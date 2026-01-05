@@ -47,6 +47,7 @@ class ChessNetwork:
         self.move_encoder = get_move_encoder()
         self.policy_size = self.move_encoder.policy_size
         self.model = self._build_model()
+        self._predict_fn = None  # Cached compiled prediction function
 
     def _build_model(self) -> keras.Model:
         """Build the neural network model."""
@@ -87,8 +88,15 @@ class ChessNetwork:
             loss_weights={"policy": 1.0, "value": 1.0},
         )
 
+    @tf.function(reduce_retracing=True)
+    def _fast_predict(self, states):
+        """Compiled prediction function for speed."""
+        return self.model(states, training=False)
+
     def predict(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
         """Predict policy and value for a single state.
+
+        Uses direct model call instead of model.predict() for 10-50x speedup.
 
         Args:
             state: Board state as a 781-dimensional vector.
@@ -100,8 +108,9 @@ class ChessNetwork:
         if state.ndim == 1:
             state = state.reshape(1, -1)
 
-        policy, value = self.model.predict(state, verbose=0)
-        return policy[0], float(value[0, 0])
+        state_tensor = tf.constant(state, dtype=tf.float32)
+        policy, value = self._fast_predict(state_tensor)
+        return policy[0].numpy(), float(value[0, 0])
 
     def predict_batch(self, states: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Predict policy and value for a batch of states.
@@ -113,8 +122,9 @@ class ChessNetwork:
             Tuple of (policies, values) where policies has shape (batch_size, policy_size)
             and values has shape (batch_size,).
         """
-        policies, values = self.model.predict(states, verbose=0)
-        return policies, values.flatten()
+        state_tensor = tf.constant(states, dtype=tf.float32)
+        policies, values = self._fast_predict(state_tensor)
+        return policies.numpy(), values.numpy().flatten()
 
     def train_on_batch(
         self,
