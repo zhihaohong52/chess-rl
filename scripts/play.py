@@ -184,9 +184,10 @@ def main():
     network = ChessNetwork(config)
     network.compile()
 
-    if os.path.exists(args.model + ".index") or os.path.exists(args.model + ".weights.h5"):
+    weights_path = args.model if args.model.endswith(".weights.h5") else args.model + ".weights.h5"
+    if os.path.exists(weights_path):
         network.load(args.model)
-        print(f"Loaded model from {args.model}")
+        print(f"Loaded model from {weights_path}")
     else:
         print(f"Warning: Model not found at {args.model}")
         print("Playing with randomly initialized network")

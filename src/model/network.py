@@ -162,6 +162,8 @@ class ChessNetwork:
         Args:
             path: Path to save the weights (without extension).
         """
+        if not path.endswith(".weights.h5"):
+            path = path + ".weights.h5"
         self.model.save_weights(path)
 
     def load(self, path: str):
@@ -170,6 +172,8 @@ class ChessNetwork:
         Args:
             path: Path to the weights file.
         """
+        if not path.endswith(".weights.h5"):
+            path = path + ".weights.h5"
         self.model.load_weights(path)
 
     def save_full_model(self, path: str):

@@ -45,11 +45,8 @@ class UCIEngine:
         self.network.compile()
 
         # Load model if provided
-        if model_path and (
-            os.path.exists(model_path + ".index") or
-            os.path.exists(model_path + ".weights.h5") or
-            os.path.exists(model_path)
-        ):
+        weights_path = model_path + ".weights.h5" if model_path and not model_path.endswith(".weights.h5") else model_path
+        if model_path and os.path.exists(weights_path):
             try:
                 self.network.load(model_path)
                 self._debug(f"Loaded model from {model_path}")
