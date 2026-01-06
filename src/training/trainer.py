@@ -10,21 +10,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from config import Config
 from src.model.network import ChessNetwork
 from src.training.self_play import SelfPlay
+from src.training.parallel_self_play import ParallelSelfPlay
 from src.training.replay_buffer import ReplayBuffer
 
 
 class Trainer:
     """Orchestrates AlphaZero-style training."""
 
-    def __init__(self, config: Optional[Config] = None, checkpoint_dir: Optional[str] = None):
+    def __init__(self, config: Optional[Config] = None, checkpoint_dir: Optional[str] = None,
+                 num_parallel: int = 8, use_parallel: bool = True):
         """Initialize the trainer.
 
         Args:
             config: Configuration object.
             checkpoint_dir: Directory for saving checkpoints.
+            num_parallel: Number of games to play in parallel.
+            use_parallel: Whether to use parallel self-play (recommended for GPU).
         """
         self.config = config or Config()
         self.checkpoint_dir = checkpoint_dir or self.config.checkpoint_dir
+        self.num_parallel = num_parallel
+        self.use_parallel = use_parallel
 
         # Initialize components
         self.network = ChessNetwork(self.config)
@@ -84,10 +90,18 @@ class Trainer:
         }
 
         # Generate self-play games
-        self_play = SelfPlay(self.network, self.config, num_simulations=num_sims)
-
         if show_progress:
-            print(f"\nIteration {self.iteration}: Generating {num_games} self-play games...")
+            mode = "parallel" if self.use_parallel else "sequential"
+            print(f"\nIteration {self.iteration}: Generating {num_games} self-play games ({mode})...")
+
+        if self.use_parallel:
+            self_play = ParallelSelfPlay(
+                self.network, self.config,
+                num_parallel=self.num_parallel,
+                num_simulations=num_sims
+            )
+        else:
+            self_play = SelfPlay(self.network, self.config, num_simulations=num_sims)
 
         examples = self_play.generate_games(num_games, show_progress=show_progress)
         self.replay_buffer.add(examples)

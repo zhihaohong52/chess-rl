@@ -1,0 +1,245 @@
+"""Parallel self-play with batched neural network inference."""
+
+import numpy as np
+from typing import List, Tuple, Optional
+from tqdm import tqdm
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config import Config
+from src.game.chess_game import ChessGame
+from src.mcts.node import Node
+
+
+class ParallelMCTS:
+    """MCTS that batches evaluations across multiple games."""
+
+    def __init__(self, network, config: Config, num_simulations: int):
+        self.network = network
+        self.config = config
+        self.num_simulations = num_simulations
+        self.c_puct = config.c_puct
+
+    def search_batch(self, games: List[ChessGame], add_noise: bool = True) -> List[Tuple[int, np.ndarray]]:
+        """Run MCTS for multiple games with batched neural network calls.
+
+        Args:
+            games: List of games to search.
+            add_noise: Whether to add Dirichlet noise.
+
+        Returns:
+            List of (action, policy) tuples for each game.
+        """
+        num_games = len(games)
+
+        # Initialize roots for each game
+        roots = [Node(prior=0) for _ in range(num_games)]
+        game_clones = [g.clone() for g in games]
+
+        # Initial expansion - batch evaluate all root positions
+        states = np.array([g.get_state() for g in games], dtype=np.float32)
+        policies, values = self.network.predict_batch(states)
+
+        for i, (game, root, policy) in enumerate(zip(games, roots, policies)):
+            legal_moves = game.get_legal_move_indices()
+            if legal_moves:
+                root.expand(policy, legal_moves)
+                if add_noise:
+                    root.add_dirichlet_noise(
+                        self.config.dirichlet_alpha,
+                        self.config.dirichlet_epsilon
+                    )
+
+        # Run simulations
+        for _ in range(self.num_simulations):
+            # For each game, traverse tree and collect leaf positions
+            leaves = []  # (game_idx, node, scratch_game, search_path)
+
+            for i in range(num_games):
+                if not roots[i].is_expanded():
+                    continue
+
+                node = roots[i]
+                scratch_game = games[i].clone()
+                search_path = [node]
+
+                # SELECT: traverse to leaf
+                while node.is_expanded():
+                    move_idx, node = node.select_child(self.c_puct)
+                    scratch_game.apply_move_index(move_idx)
+                    search_path.append(node)
+
+                leaves.append((i, node, scratch_game, search_path))
+
+            if not leaves:
+                break
+
+            # Batch evaluate all leaf positions
+            leaf_states = []
+            leaf_terminal = []
+            leaf_values = []
+
+            for game_idx, node, scratch_game, search_path in leaves:
+                if scratch_game.is_terminal():
+                    leaf_terminal.append(True)
+                    leaf_values.append(scratch_game.get_outcome_for_current_player())
+                    leaf_states.append(np.zeros(Config.input_size, dtype=np.float32))  # Placeholder
+                else:
+                    leaf_terminal.append(False)
+                    leaf_values.append(0)
+                    leaf_states.append(scratch_game.get_state())
+
+            # Batch predict for non-terminal leaves
+            leaf_states = np.array(leaf_states, dtype=np.float32)
+            non_terminal_mask = [not t for t in leaf_terminal]
+
+            if any(non_terminal_mask):
+                policies_batch, values_batch = self.network.predict_batch(leaf_states)
+
+            # Expand and backpropagate
+            batch_idx = 0
+            for leaf_idx, (game_idx, node, scratch_game, search_path) in enumerate(leaves):
+                if leaf_terminal[leaf_idx]:
+                    value = leaf_values[leaf_idx]
+                else:
+                    policy = policies_batch[leaf_idx]
+                    value = float(values_batch[leaf_idx])
+                    legal_moves = scratch_game.get_legal_move_indices()
+                    if legal_moves:
+                        node.expand(policy, legal_moves)
+
+                # Backpropagate
+                for path_node in reversed(search_path):
+                    path_node.visit_count += 1
+                    path_node.value_sum += value
+                    value = -value
+
+        # Get actions from roots
+        results = []
+        for i, (game, root) in enumerate(zip(games, roots)):
+            if not root.is_expanded():
+                results.append((-1, np.zeros(self.network.policy_size, dtype=np.float32)))
+                continue
+
+            move_indices, probs = root.get_policy()
+
+            # Create full policy array
+            full_policy = np.zeros(self.network.policy_size, dtype=np.float32)
+            for move_idx, prob in zip(move_indices, probs):
+                full_policy[move_idx] = prob
+
+            # Select action based on temperature
+            if game.move_count < self.config.temp_threshold:
+                temperature = self.config.temperature
+            else:
+                temperature = 0.1
+
+            if temperature == 0 or len(move_indices) == 1:
+                action = move_indices[np.argmax(probs)]
+            else:
+                adjusted_probs = probs ** (1.0 / temperature)
+                adjusted_probs /= adjusted_probs.sum()
+                action = np.random.choice(move_indices, p=adjusted_probs)
+
+            results.append((action, full_policy))
+
+        return results
+
+
+class ParallelSelfPlay:
+    """Generate training games through parallel self-play."""
+
+    def __init__(
+        self,
+        network,
+        config: Optional[Config] = None,
+        num_parallel: int = 8,
+        num_simulations: Optional[int] = None,
+    ):
+        """Initialize parallel self-play.
+
+        Args:
+            network: Neural network for move selection.
+            config: Configuration object.
+            num_parallel: Number of games to play in parallel.
+            num_simulations: MCTS simulations per move.
+        """
+        self.network = network
+        self.config = config or Config()
+        self.num_parallel = num_parallel
+        self.num_simulations = num_simulations or self.config.num_simulations
+        self.mcts = ParallelMCTS(network, self.config, self.num_simulations)
+
+    def generate_games(
+        self, num_games: int, show_progress: bool = True
+    ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+        """Generate multiple self-play games with parallel execution.
+
+        Args:
+            num_games: Total number of games to play.
+            show_progress: Whether to show progress bar.
+
+        Returns:
+            List of all training examples from all games.
+        """
+        all_examples = []
+        games_completed = 0
+
+        # Active games and their histories
+        active_games = []
+        game_histories = []
+
+        pbar = tqdm(total=num_games, desc="Parallel self-play", disable=not show_progress)
+
+        while games_completed < num_games:
+            # Start new games if we have capacity
+            while len(active_games) < self.num_parallel and games_completed + len(active_games) < num_games:
+                active_games.append(ChessGame())
+                game_histories.append([])
+
+            if not active_games:
+                break
+
+            # Run batched MCTS for all active games
+            results = self.mcts.search_batch(active_games, add_noise=True)
+
+            # Process results and advance games
+            games_to_remove = []
+
+            for i, (game, history, (action, policy)) in enumerate(zip(active_games, game_histories, results)):
+                if action < 0 or game.is_terminal():
+                    games_to_remove.append(i)
+                    continue
+
+                # Store training example
+                state = game.get_state()
+                current_player = game.turn
+                history.append((state, policy, current_player))
+
+                # Apply move
+                game.apply_move_index(action)
+
+                # Check if game ended
+                if game.is_terminal() or game.move_count >= self.config.max_moves:
+                    games_to_remove.append(i)
+
+            # Finalize completed games
+            for i in reversed(games_to_remove):
+                game = active_games[i]
+                history = game_histories[i]
+
+                # Get outcome and create training examples
+                outcome = game.get_outcome()
+                for state, policy, player_was_white in history:
+                    value = outcome if player_was_white else -outcome
+                    all_examples.append((state, policy, value))
+
+                # Remove completed game
+                active_games.pop(i)
+                game_histories.pop(i)
+                games_completed += 1
+                pbar.update(1)
+
+        pbar.close()
+        return all_examples
