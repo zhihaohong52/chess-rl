@@ -77,12 +77,12 @@ class ChessNetwork:
             learning_rate: Learning rate for optimizer. If None, uses config value.
         """
         lr = learning_rate or self.config.learning_rate
-        optimizer = keras.optimizers.Adam(learning_rate=lr)
+        optimizer = keras.optimizers.Adam(learning_rate=lr, clipnorm=1.0)
 
         self.model.compile(
             optimizer=optimizer,
             loss={
-                "policy": keras.losses.CategoricalCrossentropy(),
+                "policy": keras.losses.CategoricalCrossentropy(from_logits=False),
                 "value": keras.losses.MeanSquaredError(),
             },
             loss_weights={"policy": 1.0, "value": 1.0},

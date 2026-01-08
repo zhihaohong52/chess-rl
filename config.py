@@ -24,7 +24,7 @@ class Config:
 
     # Training parameters
     batch_size = 512
-    learning_rate = 0.001
+    learning_rate = 0.0002  # Lower LR for stability (was 0.001)
     weight_decay = 1e-4
     buffer_size = 100000  # Replay buffer size
     training_steps = 500  # Training steps per iteration
