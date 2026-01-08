@@ -21,6 +21,8 @@ class Config:
     temperature = 1.0  # Move selection temperature
     temp_threshold = 15  # Moves before temperature drops to near-zero
     max_moves = 512  # Maximum moves per game
+    resign_threshold = -0.9  # Resign if value drops below this (speeds up self-play)
+    resign_check_moves = 10  # Only check resign after this many moves
 
     # Training parameters
     batch_size = 512

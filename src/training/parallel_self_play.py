@@ -119,7 +119,7 @@ class ParallelMCTS:
         results = []
         for i, (game, root) in enumerate(zip(games, roots)):
             if not root.is_expanded():
-                results.append((-1, np.zeros(self.network.policy_size, dtype=np.float32)))
+                results.append((-1, np.zeros(self.network.policy_size, dtype=np.float32), 0.0))
                 continue
 
             move_indices, probs = root.get_policy()
@@ -128,6 +128,9 @@ class ParallelMCTS:
             full_policy = np.zeros(self.network.policy_size, dtype=np.float32)
             for move_idx, prob in zip(move_indices, probs):
                 full_policy[move_idx] = prob
+
+            # Get root value (average value from MCTS)
+            root_value = root.value
 
             # Select action based on temperature
             if game.move_count < self.config.temp_threshold:
@@ -142,7 +145,7 @@ class ParallelMCTS:
                 adjusted_probs /= adjusted_probs.sum()
                 action = np.random.choice(move_indices, p=adjusted_probs)
 
-            results.append((action, full_policy))
+            results.append((action, full_policy, root_value))
 
         return results
 
@@ -206,8 +209,9 @@ class ParallelSelfPlay:
 
             # Process results and advance games
             games_to_remove = []
+            resigned_outcomes = {}  # Track resigned games and their outcomes
 
-            for i, (game, history, (action, policy)) in enumerate(zip(active_games, game_histories, results)):
+            for i, (game, history, (action, policy, value)) in enumerate(zip(active_games, game_histories, results)):
                 if action < 0 or game.is_terminal():
                     games_to_remove.append(i)
                     continue
@@ -223,14 +227,27 @@ class ParallelSelfPlay:
                 # Check if game ended
                 if game.is_terminal() or game.move_count >= self.config.max_moves:
                     games_to_remove.append(i)
+                # Check resign threshold (only after some moves to avoid early resignations)
+                elif (game.move_count >= self.config.resign_check_moves and
+                      value < self.config.resign_threshold):
+                    games_to_remove.append(i)
+                    # The current player (after move) is losing, so the side that just moved wins
+                    # value is from perspective of player who just moved, and it's very negative
+                    # meaning they think they're losing, so opponent wins
+                    resigned_outcomes[i] = -1.0 if game.turn else 1.0  # Opponent of current player wins
 
             # Finalize completed games
             for i in reversed(games_to_remove):
                 game = active_games[i]
                 history = game_histories[i]
 
-                # Get outcome and create training examples
-                outcome = game.get_outcome()
+                # Get outcome (use resigned outcome if available)
+                if i in resigned_outcomes:
+                    outcome = resigned_outcomes[i]
+                else:
+                    outcome = game.get_outcome()
+
+                # Create training examples
                 for state, policy, player_was_white in history:
                     value = outcome if player_was_white else -outcome
                     all_examples.append((state, policy, value))

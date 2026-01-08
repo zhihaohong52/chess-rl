@@ -50,33 +50,49 @@ class ChessNetwork:
         self._predict_fn = None  # Cached compiled prediction function
 
     def _build_model(self) -> keras.Model:
-        """Build the neural network model."""
+        """Build the neural network model with batch normalization."""
         # Input layer
         inputs = layers.Input(shape=(Config.input_size,), name="board_input")
 
-        # Shared hidden layers
+        # Shared hidden layers with batch normalization
         x = inputs
         for i, units in enumerate(self.config.hidden_layers):
-            x = layers.Dense(units, activation="relu", name=f"hidden_{i}")(x)
+            x = layers.Dense(units, name=f"hidden_{i}")(x)
+            x = layers.BatchNormalization(name=f"bn_{i}")(x)
+            x = layers.ReLU(name=f"relu_{i}")(x)
 
         # Policy head
         policy = layers.Dense(self.policy_size, name="policy_logits")(x)
         policy_output = layers.Softmax(name="policy")(policy)
 
-        # Value head
-        value = layers.Dense(self.config.value_hidden, activation="relu", name="value_hidden")(x)
+        # Value head with batch norm
+        value = layers.Dense(self.config.value_hidden, name="value_dense")(x)
+        value = layers.BatchNormalization(name="value_bn")(value)
+        value = layers.ReLU(name="value_relu")(value)
         value_output = layers.Dense(1, activation="tanh", name="value")(value)
 
         model = keras.Model(inputs=inputs, outputs=[policy_output, value_output])
         return model
 
-    def compile(self, learning_rate: Optional[float] = None):
+    def compile(self, learning_rate: Optional[float] = None, use_schedule: bool = False,
+                total_steps: int = 50000):
         """Compile the model with optimizer and loss functions.
 
         Args:
             learning_rate: Learning rate for optimizer. If None, uses config value.
+            use_schedule: Whether to use cosine decay learning rate schedule.
+            total_steps: Total training steps for LR schedule.
         """
         lr = learning_rate or self.config.learning_rate
+
+        if use_schedule:
+            # Cosine decay with warmup
+            lr = keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=lr,
+                decay_steps=total_steps,
+                alpha=0.01  # Final LR = initial * 0.01
+            )
+
         optimizer = keras.optimizers.Adam(learning_rate=lr, clipnorm=1.0)
 
         self.model.compile(

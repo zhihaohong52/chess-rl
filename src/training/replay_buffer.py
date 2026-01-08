@@ -6,6 +6,59 @@ from typing import Tuple, List, Optional
 import random
 
 
+def mirror_square(sq: int) -> int:
+    """Mirror a square horizontally (flip file)."""
+    rank = sq // 8
+    file = sq % 8
+    return rank * 8 + (7 - file)
+
+
+def mirror_state(state: np.ndarray) -> np.ndarray:
+    """Mirror a board state horizontally.
+
+    Flips all bitboards so that files a-h become h-a.
+    """
+    mirrored = state.copy()
+
+    # Mirror each of the 12 bitboards (768 values)
+    for i in range(12):
+        offset = i * 64
+        for sq in range(64):
+            mirrored[offset + mirror_square(sq)] = state[offset + sq]
+
+    # En passant file (positions 772-779) also needs to be mirrored
+    ep_original = state[772:780].copy()
+    for i in range(8):
+        mirrored[772 + (7 - i)] = ep_original[i]
+
+    return mirrored
+
+
+def mirror_policy(policy: np.ndarray, move_encoder) -> np.ndarray:
+    """Mirror a policy horizontally.
+
+    Each move's from and to squares have their files flipped.
+    """
+    mirrored = np.zeros_like(policy)
+
+    for idx in range(len(policy)):
+        if policy[idx] > 0:
+            move = move_encoder.decode(idx)
+            from_sq = mirror_square(move.from_square)
+            to_sq = mirror_square(move.to_square)
+
+            import chess
+            mirrored_move = chess.Move(from_sq, to_sq, promotion=move.promotion)
+            try:
+                new_idx = move_encoder.encode(mirrored_move)
+                mirrored[new_idx] = policy[idx]
+            except KeyError:
+                # Move not in encoding (shouldn't happen)
+                mirrored[idx] = policy[idx]
+
+    return mirrored
+
+
 class ReplayBuffer:
     """Replay buffer for storing and sampling training examples.
 
@@ -42,11 +95,14 @@ class ReplayBuffer:
         """
         self.buffer.append((state, policy, value))
 
-    def sample(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, batch_size: int, augment: bool = False,
+               move_encoder=None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Sample a batch of training examples.
 
         Args:
             batch_size: Number of examples to sample.
+            augment: Whether to apply random horizontal mirroring (doubles effective data).
+            move_encoder: Required if augment=True, for mirroring policies.
 
         Returns:
             Tuple of (states, policies, values) as numpy arrays.
@@ -54,9 +110,19 @@ class ReplayBuffer:
         batch_size = min(batch_size, len(self.buffer))
         batch = random.sample(list(self.buffer), batch_size)
 
-        states = np.array([ex[0] for ex in batch], dtype=np.float32)
-        policies = np.array([ex[1] for ex in batch], dtype=np.float32)
+        states = [ex[0] for ex in batch]
+        policies = [ex[1] for ex in batch]
         values = np.array([ex[2] for ex in batch], dtype=np.float32)
+
+        if augment and move_encoder is not None:
+            # Randomly mirror each example with 50% probability
+            for i in range(len(states)):
+                if random.random() < 0.5:
+                    states[i] = mirror_state(states[i])
+                    policies[i] = mirror_policy(policies[i], move_encoder)
+
+        states = np.array(states, dtype=np.float32)
+        policies = np.array(policies, dtype=np.float32)
 
         return states, policies, values
 
