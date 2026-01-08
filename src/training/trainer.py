@@ -35,7 +35,11 @@ class Trainer:
         # Initialize components
         self.network = ChessNetwork(self.config)
         self.network.compile()
-        self.replay_buffer = ReplayBuffer(self.config.buffer_size)
+        self.replay_buffer = ReplayBuffer(
+            max_size=self.config.buffer_size,
+            state_size=self.config.input_size,
+            policy_size=self.network.policy_size
+        )
 
         # Training stats
         self.iteration = 0
