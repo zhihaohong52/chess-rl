@@ -175,13 +175,15 @@ class ChessNetwork:
         )
 
         # loss is [total_loss, policy_loss, value_loss]
-        if isinstance(loss, list):
+        if isinstance(loss, list) and len(loss) >= 3:
             return {
-                "total_loss": loss[0],
-                "policy_loss": loss[1],
-                "value_loss": loss[2],
+                "total_loss": float(loss[0]),
+                "policy_loss": float(loss[1]),
+                "value_loss": float(loss[2]),
             }
-        return {"total_loss": loss}
+        # Fallback: return same value for all (shouldn't happen with multi-output model)
+        total = float(loss) if not isinstance(loss, list) else float(loss[0])
+        return {"total_loss": total, "policy_loss": total, "value_loss": total}
 
     def save(self, path: str):
         """Save the model weights.

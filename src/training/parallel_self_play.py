@@ -97,15 +97,17 @@ class ParallelMCTS:
                     leaf_values.append(0)
                     leaf_states.append(scratch_game.get_state())
 
-            # Batch predict for non-terminal leaves
+            # Batch predict all leaf positions (terminal ones have placeholder states)
             leaf_states = np.array(leaf_states, dtype=np.float32)
             non_terminal_mask = [not t for t in leaf_terminal]
 
+            # Only predict if there are non-terminal leaves
+            policies_batch = None
+            values_batch = None
             if any(non_terminal_mask):
                 policies_batch, values_batch = self.network.predict_batch(leaf_states)
 
             # Expand and backpropagate
-            batch_idx = 0
             for leaf_idx, (game_idx, node, scratch_game, search_path) in enumerate(leaves):
                 if leaf_terminal[leaf_idx]:
                     value = leaf_values[leaf_idx]
