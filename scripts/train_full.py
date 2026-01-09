@@ -143,6 +143,35 @@ Examples:
         default=10,
         help="Phase 1: Stockfish depth for training data (default: 10)",
     )
+    parser.add_argument(
+        "--p1-cache-dir",
+        type=str,
+        default=None,
+        help="Phase 1: Supervised cache directory (default: config)",
+    )
+    parser.add_argument(
+        "--p1-cache-size",
+        type=int,
+        default=None,
+        help="Phase 1: Number of cached supervised examples (default: config)",
+    )
+    parser.add_argument(
+        "--p1-cache-dtype",
+        type=str,
+        choices=["float16", "float32"],
+        default=None,
+        help="Phase 1: Cache dtype for states/policies (default: config)",
+    )
+    parser.add_argument(
+        "--p1-no-cache",
+        action="store_true",
+        help="Phase 1: Disable supervised cache",
+    )
+    parser.add_argument(
+        "--p1-rebuild-cache",
+        action="store_true",
+        help="Phase 1: Rebuild supervised cache even if present",
+    )
 
     # Phase 2: Curriculum Learning
     parser.add_argument(
@@ -241,6 +270,8 @@ Examples:
         args.p2_training_steps = 20
         args.p3_iterations = 3
         args.p3_games = 8
+        if args.p1_cache_size is None:
+            args.p1_cache_size = 512
 
     # Find Stockfish
     stockfish_path = args.stockfish or find_stockfish()
@@ -267,6 +298,18 @@ Examples:
 
     # Initialize config
     config = Config()
+
+    # Apply config overrides
+    if args.p1_no_cache:
+        config.supervised_cache_enabled = False
+    if args.p1_cache_dir is not None:
+        config.supervised_cache_dir = args.p1_cache_dir
+    if args.p1_cache_size is not None:
+        config.supervised_cache_size = args.p1_cache_size
+    if args.p1_cache_dtype is not None:
+        config.supervised_cache_dtype = args.p1_cache_dtype
+    if args.p1_rebuild_cache:
+        config.supervised_cache_rebuild = True
 
     # Initialize pipeline
     pipeline = FullTrainingPipeline(

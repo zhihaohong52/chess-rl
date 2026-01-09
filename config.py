@@ -52,6 +52,11 @@ class Config:
     supervised_multipv = 4
     supervised_policy_temperature = 1.0
     supervised_augment = True
+    supervised_cache_enabled = True
+    supervised_cache_dir = "cache/supervised"
+    supervised_cache_size = 20000
+    supervised_cache_dtype = "float16"
+    supervised_cache_rebuild = False
 
     # Curriculum learning (Phase 2)
     curriculum_games_per_iteration = 40

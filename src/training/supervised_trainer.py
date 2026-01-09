@@ -2,6 +2,7 @@
 
 import numpy as np
 from typing import Optional, List, Tuple
+import json
 from tqdm import tqdm
 import chess
 import os
@@ -53,6 +54,15 @@ class SupervisedTrainer:
         self.position_max_moves = self.config.supervised_position_max_moves
         self.position_temperature = self.config.supervised_position_temperature
         self.augment = self.config.supervised_augment
+        self.cache_enabled = self.config.supervised_cache_enabled
+        self.cache_dir = self.config.supervised_cache_dir
+        self.cache_size = self.config.supervised_cache_size
+        self.cache_dtype = self.config.supervised_cache_dtype
+        self.cache_rebuild = self.config.supervised_cache_rebuild
+        self.cache_states = None
+        self.cache_policies = None
+        self.cache_values = None
+        self.cache_count = 0
 
         # Initialize Stockfish
         self.stockfish = StockfishEvaluator(
@@ -61,6 +71,152 @@ class SupervisedTrainer:
             time_limit=0.1,
             multipv=self.multipv,
         )
+
+        if self.cache_enabled:
+            self._ensure_cache()
+
+    def _cache_paths(self) -> Tuple[str, str, str, str]:
+        """Return paths for cached arrays and metadata."""
+        base = self.cache_dir
+        return (
+            os.path.join(base, "states.npy"),
+            os.path.join(base, "policies.npy"),
+            os.path.join(base, "values.npy"),
+            os.path.join(base, "meta.json"),
+        )
+
+    def _cache_meta(self) -> dict:
+        """Build metadata for cache validation."""
+        return {
+            "version": 1,
+            "input_shape": list(self.config.input_shape),
+            "policy_size": self.move_encoder.policy_size,
+            "cache_size": int(self.cache_size),
+            "dtype": str(self.cache_dtype),
+            "stockfish_depth": int(self.stockfish.depth),
+            "multipv": int(self.multipv),
+            "position_source": self.position_source,
+            "position_max_moves": int(self.position_max_moves),
+            "position_temperature": float(self.position_temperature),
+            "policy_temperature": float(self.policy_temperature),
+        }
+
+    def _load_cache(self) -> bool:
+        """Load cache if it matches current configuration."""
+        states_path, policies_path, values_path, meta_path = self._cache_paths()
+        if not (os.path.exists(states_path) and os.path.exists(policies_path) and
+                os.path.exists(values_path) and os.path.exists(meta_path)):
+            return False
+
+        try:
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                meta = json.load(handle)
+        except Exception:
+            return False
+
+        expected = self._cache_meta()
+        for key in ("version", "input_shape", "policy_size", "cache_size", "dtype",
+                    "stockfish_depth", "multipv", "position_source",
+                    "position_max_moves", "position_temperature", "policy_temperature"):
+            if meta.get(key) != expected.get(key):
+                return False
+
+        self.cache_count = int(meta.get("cache_size", 0))
+        if self.cache_count <= 0:
+            return False
+
+        self.cache_states = np.load(states_path, mmap_mode="r")
+        self.cache_policies = np.load(policies_path, mmap_mode="r")
+        self.cache_values = np.load(values_path, mmap_mode="r")
+        return True
+
+    def _build_cache(self):
+        """Generate a supervised dataset cache on disk."""
+        os.makedirs(self.cache_dir, exist_ok=True)
+        states_path, policies_path, values_path, meta_path = self._cache_paths()
+
+        dtype = np.float16 if str(self.cache_dtype).lower() == "float16" else np.float32
+        states_mm = np.lib.format.open_memmap(
+            states_path,
+            mode="w+",
+            dtype=dtype,
+            shape=(self.cache_size, *self.config.input_shape),
+        )
+        policies_mm = np.lib.format.open_memmap(
+            policies_path,
+            mode="w+",
+            dtype=dtype,
+            shape=(self.cache_size, self.move_encoder.policy_size),
+        )
+        values_mm = np.lib.format.open_memmap(
+            values_path,
+            mode="w+",
+            dtype=dtype,
+            shape=(self.cache_size,),
+        )
+
+        filled = 0
+        pbar = tqdm(total=self.cache_size, desc="Building supervised cache", leave=True)
+        while filled < self.cache_size:
+            batch = min(512, self.cache_size - filled)
+            states, policies, values = self.generate_training_batch(
+                batch,
+                max_position_moves=self.position_max_moves,
+                augment=False,
+                show_progress=False,
+            )
+            if len(states) == 0:
+                continue
+
+            take = min(len(states), self.cache_size - filled)
+            states_mm[filled:filled + take] = states[:take].astype(dtype, copy=False)
+            policies_mm[filled:filled + take] = policies[:take].astype(dtype, copy=False)
+            values_mm[filled:filled + take] = values[:take].astype(dtype, copy=False)
+            filled += take
+            pbar.update(take)
+
+        pbar.close()
+        states_mm.flush()
+        policies_mm.flush()
+        values_mm.flush()
+
+        meta = self._cache_meta()
+        meta["cache_size"] = int(self.cache_size)
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, indent=2)
+
+        self.cache_states = np.load(states_path, mmap_mode="r")
+        self.cache_policies = np.load(policies_path, mmap_mode="r")
+        self.cache_values = np.load(values_path, mmap_mode="r")
+        self.cache_count = self.cache_size
+
+    def _ensure_cache(self):
+        """Load cache or build it if missing/mismatched."""
+        if not self.cache_dir or self.cache_size <= 0:
+            self.cache_enabled = False
+            return
+        if not self.cache_rebuild and self._load_cache():
+            return
+        self._build_cache()
+
+    def _sample_from_cache(self, batch_size: int, augment: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sample a training batch from the cached dataset."""
+        if self.cache_states is None or self.cache_count <= 0:
+            return np.empty((0, *self.config.input_shape), dtype=np.float32), np.empty(
+                (0, self.move_encoder.policy_size), dtype=np.float32), np.empty((0,), dtype=np.float32)
+
+        indices = np.random.randint(0, self.cache_count, size=batch_size)
+        states = np.array(self.cache_states[indices], dtype=np.float32, copy=False)
+        policies = np.array(self.cache_policies[indices], dtype=np.float32, copy=False)
+        values = np.array(self.cache_values[indices], dtype=np.float32, copy=False)
+
+        if augment:
+            mirror_mask = np.random.random(len(states)) < 0.5
+            for i in np.where(mirror_mask)[0]:
+                states[i] = mirror_state(states[i])
+                policies[i] = mirror_policy(policies[i], self.move_encoder)
+
+        return states, policies, values
 
     def _sample_move(self, move_probs: List[Tuple[chess.Move, float]]) -> Optional[chess.Move]:
         """Sample a move from a list of (move, prob)."""
@@ -72,16 +228,17 @@ class SupervisedTrainer:
         idx = np.random.choice(len(moves), p=probs)
         return moves[idx]
 
-    def generate_random_position(self, max_moves: int = 40) -> chess.Board:
+    def generate_random_position(self, max_moves: int = 40) -> Tuple[chess.Board, List[chess.Board]]:
         """Generate a random legal chess position by playing random moves.
 
         Args:
             max_moves: Maximum number of random moves to play.
 
         Returns:
-            A chess board in a random position.
+            Tuple of (board, history) with history containing recent boards.
         """
         board = chess.Board()
+        history = [board.copy()]
         num_moves = np.random.randint(1, max_moves + 1)
 
         for _ in range(num_moves):
@@ -92,12 +249,14 @@ class SupervisedTrainer:
                 break
             move = np.random.choice(moves)
             board.push(move)
+            history.append(board.copy())
 
-        return board
+        return board, history[-self.config.history_length:]
 
-    def generate_stockfish_position(self, max_moves: int = 40) -> chess.Board:
+    def generate_stockfish_position(self, max_moves: int = 40) -> Tuple[chess.Board, List[chess.Board]]:
         """Generate a position by playing Stockfish moves with sampling."""
         board = chess.Board()
+        history = [board.copy()]
         num_moves = np.random.randint(1, max_moves + 1)
 
         for _ in range(num_moves):
@@ -112,8 +271,9 @@ class SupervisedTrainer:
             if move is None:
                 break
             board.push(move)
+            history.append(board.copy())
 
-        return board
+        return board, history[-self.config.history_length:]
 
     def generate_training_batch(
         self,
@@ -132,6 +292,9 @@ class SupervisedTrainer:
         Returns:
             Tuple of (states, policies, values).
         """
+        if self.cache_enabled and self.cache_states is not None:
+            return self._sample_from_cache(batch_size, augment=augment)
+
         states = []
         policies = []
         values = []
@@ -143,9 +306,9 @@ class SupervisedTrainer:
         for _ in iterator:
             # Generate random position
             if self.position_source == "stockfish":
-                board = self.generate_stockfish_position(max_position_moves)
+                board, history = self.generate_stockfish_position(max_position_moves)
             else:
-                board = self.generate_random_position(max_position_moves)
+                board, history = self.generate_random_position(max_position_moves)
 
             # Skip terminal positions
             if board.is_game_over():
@@ -162,7 +325,7 @@ class SupervisedTrainer:
                 continue
 
             # Encode state
-            state = BoardEncoder.encode(board)
+            state = BoardEncoder.encode(board, history=history)
 
             # Create policy from Stockfish MultiPV
             policy = np.zeros(self.move_encoder.policy_size, dtype=np.float32)
