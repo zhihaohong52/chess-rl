@@ -52,7 +52,7 @@ class SelfPlay:
             if move_count < self.config.temp_threshold:
                 temperature = self.config.temperature
             else:
-                temperature = 0.1  # Near-greedy after threshold
+                temperature = self.config.late_temperature
 
             # Run MCTS and get action
             add_noise = game.move_count < self.config.dirichlet_moves
@@ -133,7 +133,7 @@ class SelfPlay:
             if move_count < self.config.temp_threshold:
                 temperature = self.config.temperature
             else:
-                temperature = 0.1
+                temperature = self.config.late_temperature
 
             add_noise = game.move_count < self.config.dirichlet_moves
             action, policy, root_value = mcts.get_action(game, temperature=temperature, add_noise=add_noise)

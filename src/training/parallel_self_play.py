@@ -143,7 +143,7 @@ class ParallelMCTS:
             if game.move_count < self.config.temp_threshold:
                 temperature = self.config.temperature
             else:
-                temperature = 0.1
+                temperature = self.config.late_temperature
 
             if temperature == 0 or len(move_indices) == 1:
                 action = move_indices[np.argmax(probs)]
@@ -239,10 +239,11 @@ class ParallelSelfPlay:
                 elif (game.move_count >= self.config.resign_check_moves and
                       root_value < self.config.resign_threshold):
                     games_to_remove.append(i)
-                    # The current player (after move) is losing, so the side that just moved wins
-                    # value is from perspective of player who just moved, and it's very negative
-                    # meaning they think they're losing, so opponent wins
-                    resigned_outcomes[i] = -1.0 if game.turn else 1.0  # Opponent of current player wins
+                    # value is from the perspective of the player who just moved (before game.turn flipped)
+                    # If value < threshold, the player who just moved thinks they're losing
+                    # So the current player (game.turn after the move) is winning
+                    # Outcome is from white's perspective: 1.0 = white wins, -1.0 = black wins
+                    resigned_outcomes[i] = 1.0 if game.turn else -1.0  # Current player wins
 
             # Finalize completed games
             for i in reversed(games_to_remove):

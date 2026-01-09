@@ -1,5 +1,6 @@
 """Full training pipeline: Supervised → Curriculum → Self-Play."""
 
+import copy
 import numpy as np
 from typing import Optional, List
 import os
@@ -177,16 +178,17 @@ class FullTrainingPipeline:
         print("Developing unique strategies through self-play")
         print("="*60)
 
-        # Update config for self-play
-        self.config.num_simulations = num_simulations
-        self.config.games_per_iteration = games_per_iteration
-        self.config.training_steps = training_steps
-        self.config.warmup_games = games_per_iteration
-        self.config.main_games = games_per_iteration
+        # Create a copy of config for self-play (avoid mutating original)
+        selfplay_config = copy.copy(self.config)
+        selfplay_config.num_simulations = num_simulations
+        selfplay_config.games_per_iteration = games_per_iteration
+        selfplay_config.training_steps = training_steps
+        selfplay_config.warmup_games = games_per_iteration
+        selfplay_config.main_games = games_per_iteration
 
         # Create trainer with existing network
         trainer = Trainer(
-            config=self.config,
+            config=selfplay_config,
             checkpoint_dir=self.checkpoint_dir,
             num_parallel=num_parallel,
             use_parallel=True,
