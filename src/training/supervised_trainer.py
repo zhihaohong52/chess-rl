@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import Optional, List, Tuple
 
 import chess
@@ -76,6 +76,8 @@ def _generate_supervised_batch_worker(
     position_source: str,
     position_max_moves: int,
     position_temperature: float,
+    hash_mb: int = 16,
+    threads: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Worker to generate supervised samples with a private Stockfish evaluator."""
     move_encoder = get_move_encoder()
@@ -84,6 +86,8 @@ def _generate_supervised_batch_worker(
         depth=stockfish_depth,
         time_limit=0.1,
         multipv=multipv,
+        hash_mb=hash_mb,
+        threads=threads,
     )
     try:
         states = []
@@ -183,7 +187,9 @@ class SupervisedTrainer:
         self.cache_dtype = self.config.supervised_cache_dtype
         self.cache_rebuild = self.config.supervised_cache_rebuild
         self.cache_workers = getattr(self.config, "supervised_cache_workers", 1)
-        self.cache_batch_size = getattr(self.config, "supervised_cache_batch_size", 512)
+        self.cache_batch_size = getattr(self.config, "supervised_cache_batch_size", 64)
+        self.stockfish_hash_mb = getattr(self.config, "stockfish_hash_mb", 16)
+        self.stockfish_threads = getattr(self.config, "stockfish_threads", 1)
         self.cache_states = None
         self.cache_policies = None
         self.cache_values = None
@@ -357,17 +363,30 @@ class SupervisedTrainer:
             self.position_source,
             int(self.position_max_moves),
             float(self.position_temperature),
+            int(self.stockfish_hash_mb),
+            int(self.stockfish_threads),
         )
 
+        # Keep 2x worker_count tasks in flight for better throughput
+        max_pending = worker_count * 2
+
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            pending = {
-                executor.submit(_generate_supervised_batch_worker, *worker_args): worker_args
-                for _ in range(worker_count)
-            }
+            pending = set()
+            # Submit initial batch of tasks
+            for _ in range(max_pending):
+                pending.add(executor.submit(_generate_supervised_batch_worker, *worker_args))
+
             while pending and filled < self.cache_size:
-                for future in as_completed(list(pending)):
-                    pending.pop(future, None)
-                    states, policies, values = future.result()
+                # Wait for at least one task to complete
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+
+                for future in done:
+                    try:
+                        states, policies, values = future.result()
+                    except Exception as e:
+                        print(f"Worker error: {e}")
+                        continue
+
                     if len(states) > 0:
                         take = min(len(states), self.cache_size - filled)
                         states_mm[filled:filled + take] = states[:take].astype(dtype, copy=False)
@@ -375,13 +394,14 @@ class SupervisedTrainer:
                         values_mm[filled:filled + take] = values[:take].astype(dtype, copy=False)
                         filled += take
                         pbar.update(take)
-                    if filled < self.cache_size:
-                        pending[executor.submit(_generate_supervised_batch_worker, *worker_args)] = worker_args
-                    if filled >= self.cache_size:
-                        for pending_future in pending:
-                            pending_future.cancel()
-                        pending.clear()
-                        break
+
+                # Refill pending queue to max_pending
+                while len(pending) < max_pending and filled < self.cache_size:
+                    pending.add(executor.submit(_generate_supervised_batch_worker, *worker_args))
+
+            # Cancel remaining futures if we're done
+            for future in pending:
+                future.cancel()
 
         pbar.close()
         states_mm.flush()

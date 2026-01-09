@@ -60,7 +60,7 @@ class FullTrainingPipeline:
         num_iterations: int = 20,
         batch_size: int = 256,
         batches_per_iteration: int = 100,
-        stockfish_depth: int = 10,
+        stockfish_depth: int = 8,
     ) -> List[dict]:
         """Phase 1: Supervised learning from Stockfish.
 
@@ -68,7 +68,7 @@ class FullTrainingPipeline:
             num_iterations: Number of supervised iterations.
             batch_size: Batch size for training.
             batches_per_iteration: Batches per iteration.
-            stockfish_depth: Stockfish depth for generating training data.
+            stockfish_depth: Stockfish depth for training data (default: 8).
 
         Returns:
             Training history.
@@ -101,13 +101,14 @@ class FullTrainingPipeline:
 
     def phase2_curriculum(
         self,
-        num_iterations: int = 50,
+        num_iterations: int = 1000,
         games_per_iteration: Optional[int] = None,
         training_steps: Optional[int] = None,
-        initial_depth: int = 1,
-        max_depth: int = 6,
+        initial_depth: Optional[int] = None,
+        max_depth: Optional[int] = None,
         promotion_threshold: float = 0.55,
-        num_simulations: int = 100,
+        num_simulations: Optional[int] = None,
+        early_stop: bool = True,
     ) -> List[dict]:
         """Phase 2: Curriculum learning against Stockfish.
 
@@ -123,6 +124,10 @@ class FullTrainingPipeline:
         Returns:
             Training history.
         """
+        # Use config defaults if not specified
+        initial_depth = initial_depth or getattr(self.config, "curriculum_initial_depth", 1)
+        max_depth = max_depth or getattr(self.config, "curriculum_max_depth", 12)
+
         print("\n" + "="*60)
         print("PHASE 2: CURRICULUM LEARNING")
         print(f"Playing against Stockfish (depth {initial_depth} → {max_depth})")
@@ -144,6 +149,7 @@ class FullTrainingPipeline:
                 show_progress=True,
                 checkpoint_dir=self.checkpoint_dir,
                 checkpoint_interval=10,
+                early_stop=early_stop,
             )
 
         # Save phase 2 checkpoint

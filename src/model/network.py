@@ -15,7 +15,7 @@ from src.game.move_encoder import get_move_encoder
 
 
 class ChessNetwork:
-    """Lightweight residual CNN with policy and value heads."""
+    """Residual CNN with policy and value heads, supporting SE attention."""
 
     def __init__(self, config: Optional[Config] = None):
         """Initialize the network.
@@ -26,19 +26,36 @@ class ChessNetwork:
         self.config = config or Config()
         self.move_encoder = get_move_encoder()
         self.policy_size = self.move_encoder.policy_size
+        self.use_se = getattr(self.config, "use_se_blocks", True)
+        self.se_ratio = getattr(self.config, "se_ratio", 4)
+        self.policy_channels = getattr(self.config, "policy_channels", 32)
+        self.value_channels = getattr(self.config, "value_channels", 32)
         self.model = self._build_model()
         self._predict_fn = None  # Cached compiled prediction function
 
         print(self.model.summary())
 
+    def _se_block(self, x: tf.Tensor, filters: int, idx: int) -> tf.Tensor:
+        """Squeeze-and-Excitation block for channel attention."""
+        se = layers.GlobalAveragePooling2D(name=f"res{idx}_se_pool")(x)
+        se = layers.Dense(filters // self.se_ratio, activation="relu", name=f"res{idx}_se_fc1")(se)
+        se = layers.Dense(filters, activation="sigmoid", name=f"res{idx}_se_fc2")(se)
+        se = layers.Reshape((1, 1, filters), name=f"res{idx}_se_reshape")(se)
+        return layers.Multiply(name=f"res{idx}_se_mul")([x, se])
+
     def _residual_block(self, x: tf.Tensor, filters: int, idx: int) -> tf.Tensor:
-        """Residual block with two 3x3 convolutions."""
+        """Residual block with two 3x3 convolutions and optional SE attention."""
         shortcut = x
         x = layers.Conv2D(filters, 3, padding="same", use_bias=False, name=f"res{idx}_conv1")(x)
         x = layers.BatchNormalization(name=f"res{idx}_bn1")(x)
         x = layers.ReLU(name=f"res{idx}_relu1")(x)
         x = layers.Conv2D(filters, 3, padding="same", use_bias=False, name=f"res{idx}_conv2")(x)
         x = layers.BatchNormalization(name=f"res{idx}_bn2")(x)
+
+        # Squeeze-and-Excitation attention
+        if self.use_se:
+            x = self._se_block(x, filters, idx)
+
         x = layers.Add(name=f"res{idx}_add")([shortcut, x])
         x = layers.ReLU(name=f"res{idx}_relu2")(x)
         return x
@@ -60,20 +77,24 @@ class ChessNetwork:
         for i in range(self.config.residual_blocks):
             x = self._residual_block(x, self.config.residual_filters, i)
 
-        # Policy head
-        policy = layers.Conv2D(2, 1, use_bias=False, name="policy_conv")(x)
+        # Policy head - 1x1 conv to reduce channels, then flatten to policy
+        policy = layers.Conv2D(self.policy_channels, 1, use_bias=False, name="policy_conv")(x)
         policy = layers.BatchNormalization(name="policy_bn")(policy)
         policy = layers.ReLU(name="policy_relu")(policy)
         policy = layers.Flatten(name="policy_flatten")(policy)
         policy = layers.Dense(self.policy_size, name="policy_logits")(policy)
         policy_output = layers.Softmax(name="policy")(policy)
 
-        # Value head
-        value = layers.Conv2D(1, 1, use_bias=False, name="value_conv")(x)
-        value = layers.BatchNormalization(name="value_bn")(value)
-        value = layers.ReLU(name="value_relu")(value)
-        value = layers.Flatten(name="value_flatten")(value)
-        value = layers.Dense(self.config.value_hidden, activation="relu", name="value_dense")(value)
+        # Value head - 1x1 conv then combine global + spatial features
+        value_spatial = layers.Conv2D(self.value_channels, 1, use_bias=False, name="value_conv")(x)
+        value_spatial = layers.BatchNormalization(name="value_bn")(value_spatial)
+        value_spatial = layers.ReLU(name="value_relu")(value_spatial)
+
+        # Global features (position-invariant) - key improvement over original
+        value_global = layers.GlobalAveragePooling2D(name="value_global_pool")(value_spatial)
+
+        # Combine with hidden layer
+        value = layers.Dense(self.config.value_hidden, activation="relu", name="value_dense")(value_global)
         value_output = layers.Dense(1, activation="tanh", name="value")(value)
 
         model = keras.Model(inputs=inputs, outputs=[policy_output, value_output])

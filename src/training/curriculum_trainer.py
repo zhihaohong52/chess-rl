@@ -3,6 +3,7 @@
 import numpy as np
 from typing import Optional, List, Tuple
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import chess
 import os
 import sys
@@ -32,7 +33,7 @@ class CurriculumTrainer:
         initial_depth: int = 1,
         max_depth: int = 8,
         promotion_threshold: float = 0.55,  # Win rate to advance
-        num_simulations: int = 100,
+        num_simulations: Optional[int] = None,
     ):
         """Initialize curriculum trainer.
 
@@ -48,15 +49,17 @@ class CurriculumTrainer:
         self.network = network
         self.config = config or Config()
         self.move_encoder = get_move_encoder()
+        self.stockfish_path = stockfish_path
 
         self.current_depth = initial_depth
         self.max_depth = max_depth
         self.promotion_threshold = promotion_threshold
-        self.num_simulations = num_simulations
+        self.num_simulations = num_simulations or getattr(self.config, "curriculum_num_simulations", 100)
         self.teacher_policy_weight = self.config.curriculum_policy_weight
         self.teacher_value_weight = self.config.curriculum_value_weight
         self.teacher_multipv = self.config.curriculum_multipv
         self.teacher_policy_temperature = self.config.curriculum_policy_temperature
+        self.num_parallel = getattr(self.config, "curriculum_num_parallel", 4)
 
         # Initialize Stockfish
         self.stockfish = StockfishEvaluator(
@@ -68,6 +71,8 @@ class CurriculumTrainer:
             elo=self.config.curriculum_elo,
             skill_level=self.config.curriculum_skill_level,
         )
+        if self.stockfish_path is None:
+            self.stockfish_path = self.stockfish.stockfish_path
 
         # Stats tracking
         self.wins = 0
@@ -221,6 +226,278 @@ class CurriculumTrainer:
 
         return all_examples, stats
 
+    def run_games_parallel(
+        self,
+        num_games: int,
+        show_progress: bool = True,
+    ) -> Tuple[List[Tuple], dict]:
+        """Run multiple games against Stockfish with parallel batched inference.
+
+        Uses batched neural network calls across multiple simultaneous games
+        for significantly faster throughput.
+
+        Args:
+            num_games: Number of games to play.
+            show_progress: Whether to show progress bar.
+
+        Returns:
+            Tuple of (all_examples, stats).
+        """
+        from src.mcts.node import Node
+
+        all_examples = []
+        wins, losses, draws = 0, 0, 0
+        games_completed = 0
+
+        # Create multiple Stockfish instances for parallel games
+        stockfish_instances = []
+        for _ in range(self.num_parallel):
+            sf = StockfishEvaluator(
+                stockfish_path=self.stockfish_path,
+                depth=self.current_depth,
+                time_limit=0.05 + self.current_depth * 0.02,
+                multipv=self.teacher_multipv,
+            )
+            stockfish_instances.append(sf)
+
+        pbar = tqdm(total=num_games, desc=f"Playing vs Stockfish (depth {self.current_depth})",
+                    disable=not show_progress)
+
+        try:
+            # Active game state
+            active_games = []      # ChessGame instances
+            active_histories = []  # [(state, policy, teacher_value), ...]
+            active_colors = []     # bot_color for each game
+            active_stockfish = []  # Stockfish instance for each game
+
+            while games_completed < num_games:
+                # Start new games if we have capacity
+                while len(active_games) < self.num_parallel and games_completed + len(active_games) < num_games:
+                    game_idx = games_completed + len(active_games)
+                    bot_color = (game_idx % 2 == 0)
+                    active_games.append(ChessGame())
+                    active_histories.append([])
+                    active_colors.append(bot_color)
+                    active_stockfish.append(stockfish_instances[len(active_games) - 1])
+
+                if not active_games:
+                    break
+
+                # Separate games by whose turn it is
+                bot_turn_indices = []
+                sf_turn_indices = []
+
+                for i, (game, bot_color) in enumerate(zip(active_games, active_colors)):
+                    if game.is_terminal() or game.move_count >= self.config.max_moves:
+                        continue
+                    is_bot_turn = (game.turn == chess.WHITE) == bot_color
+                    if is_bot_turn:
+                        bot_turn_indices.append(i)
+                    else:
+                        sf_turn_indices.append(i)
+
+                # Handle Stockfish turns (can't batch these, but they're fast)
+                for i in sf_turn_indices:
+                    sf_move = active_stockfish[i].get_best_move(active_games[i].board)
+                    if sf_move:
+                        active_games[i].apply_move(sf_move)
+
+                # Handle bot turns with batched MCTS
+                if bot_turn_indices:
+                    self._run_batched_mcts_step(
+                        [active_games[i] for i in bot_turn_indices],
+                        [active_histories[i] for i in bot_turn_indices],
+                        [active_stockfish[i] for i in bot_turn_indices],
+                    )
+
+                # Check for completed games
+                games_to_remove = []
+                for i, game in enumerate(active_games):
+                    if game.is_terminal() or game.move_count >= self.config.max_moves:
+                        games_to_remove.append(i)
+
+                # Finalize completed games
+                for i in reversed(games_to_remove):
+                    game = active_games[i]
+                    history = active_histories[i]
+                    bot_color = active_colors[i]
+
+                    game_result = game.get_outcome()
+                    bot_outcome = game_result if bot_color else -game_result
+
+                    # Convert examples with final outcome
+                    for state, policy, teacher_value in history:
+                        value = (
+                            self.teacher_value_weight * teacher_value
+                            + (1.0 - self.teacher_value_weight) * bot_outcome
+                        )
+                        all_examples.append((state, policy, value))
+
+                    if bot_outcome > 0:
+                        wins += 1
+                    elif bot_outcome < 0:
+                        losses += 1
+                    else:
+                        draws += 1
+
+                    active_games.pop(i)
+                    active_histories.pop(i)
+                    active_colors.pop(i)
+                    active_stockfish.pop(i)
+                    games_completed += 1
+                    pbar.update(1)
+
+        finally:
+            pbar.close()
+            for sf in stockfish_instances:
+                sf.close()
+
+        stats = {
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "win_rate": wins / num_games if num_games > 0 else 0,
+            "depth": self.current_depth,
+        }
+
+        return all_examples, stats
+
+    def _run_batched_mcts_step(
+        self,
+        games: List[ChessGame],
+        histories: List[List],
+        stockfish_instances: List[StockfishEvaluator],
+    ):
+        """Run one MCTS step for multiple games with batched neural network calls."""
+        from src.mcts.node import Node
+
+        num_games = len(games)
+        if num_games == 0:
+            return
+
+        # Initialize MCTS roots for each game
+        roots = [Node(prior=0) for _ in range(num_games)]
+
+        # Batch initial evaluation
+        states = np.array([g.get_state() for g in games], dtype=np.float32)
+        policies, _ = self.network.predict_batch(states)
+
+        for i, (game, root, policy) in enumerate(zip(games, roots, policies)):
+            legal_moves = game.get_legal_move_indices()
+            if legal_moves:
+                root.expand(policy, legal_moves)
+                if game.move_count < self.config.dirichlet_moves:
+                    root.add_dirichlet_noise(
+                        self.config.dirichlet_alpha,
+                        self.config.dirichlet_epsilon
+                    )
+
+        # Run MCTS simulations
+        for _ in range(self.num_simulations):
+            leaves = []
+
+            for i in range(num_games):
+                if not roots[i].is_expanded():
+                    continue
+
+                node = roots[i]
+                scratch_game = games[i].clone()
+                search_path = [node]
+
+                while node.is_expanded():
+                    move_idx, node = node.select_child(self.config.c_puct)
+                    scratch_game.apply_move_index(move_idx)
+                    search_path.append(node)
+
+                leaves.append((i, node, scratch_game, search_path))
+
+            if not leaves:
+                break
+
+            # Batch evaluate leaves
+            leaf_states = []
+            leaf_terminal = []
+            leaf_values = []
+
+            for _, node, scratch_game, _ in leaves:
+                if scratch_game.is_terminal():
+                    leaf_terminal.append(True)
+                    leaf_values.append(scratch_game.get_outcome_for_current_player())
+                    leaf_states.append(np.zeros(self.config.input_shape, dtype=np.float32))
+                else:
+                    leaf_terminal.append(False)
+                    leaf_values.append(0)
+                    leaf_states.append(scratch_game.get_state())
+
+            policies_batch = None
+            values_batch = None
+            if any(not t for t in leaf_terminal):
+                leaf_states = np.array(leaf_states, dtype=np.float32)
+                policies_batch, values_batch = self.network.predict_batch(leaf_states)
+
+            # Expand and backpropagate
+            for leaf_idx, (game_idx, node, scratch_game, search_path) in enumerate(leaves):
+                if leaf_terminal[leaf_idx]:
+                    value = leaf_values[leaf_idx]
+                else:
+                    policy = policies_batch[leaf_idx]
+                    value = float(values_batch[leaf_idx])
+                    legal_moves = scratch_game.get_legal_move_indices()
+                    if legal_moves:
+                        node.expand(policy, legal_moves)
+
+                for path_node in reversed(search_path):
+                    path_node.visit_count += 1
+                    path_node.value_sum += value
+                    value = -value
+
+        # Get actions and create training examples
+        for i, (game, root, sf) in enumerate(zip(games, roots, stockfish_instances)):
+            if not root.is_expanded():
+                continue
+
+            state = game.get_state()
+            move_indices, probs = root.get_policy()
+
+            # Create policy array
+            policy = np.zeros(self.move_encoder.policy_size, dtype=np.float32)
+            for move_idx, prob in zip(move_indices, probs):
+                policy[move_idx] = prob
+
+            # Get teacher policy/value from Stockfish
+            move_probs, teacher_value = sf.get_policy_and_value(
+                game.board,
+                multipv=self.teacher_multipv,
+                policy_temperature=self.teacher_policy_temperature,
+            )
+
+            teacher_policy = np.zeros(self.move_encoder.policy_size, dtype=np.float32)
+            for move, prob in move_probs:
+                try:
+                    move_idx = self.move_encoder.encode(move)
+                    teacher_policy[move_idx] = prob
+                except KeyError:
+                    continue
+
+            if teacher_policy.sum() > 0:
+                teacher_policy /= teacher_policy.sum()
+                policy = (
+                    (1.0 - self.teacher_policy_weight) * policy
+                    + self.teacher_policy_weight * teacher_policy
+                )
+
+            if policy.sum() > 0:
+                policy /= policy.sum()
+
+            # Select action
+            if len(move_indices) > 0:
+                adjusted_probs = probs ** 2.0  # temperature=0.5
+                adjusted_probs /= adjusted_probs.sum()
+                action = np.random.choice(move_indices, p=adjusted_probs)
+
+                histories[i].append((state, policy, teacher_value))
+                game.apply_move_index(action)
+
     def check_promotion(self) -> bool:
         """Check if bot should be promoted to next depth.
 
@@ -268,8 +545,11 @@ class CurriculumTrainer:
         """
         training_steps = training_steps or self.config.curriculum_training_steps
 
-        # Play games
-        examples, game_stats = self.run_games(num_games, show_progress)
+        # Play games (use parallel version if num_parallel > 1)
+        if self.num_parallel > 1:
+            examples, game_stats = self.run_games_parallel(num_games, show_progress)
+        else:
+            examples, game_stats = self.run_games(num_games, show_progress)
 
         # Update global stats
         self.wins += game_stats["wins"]
@@ -317,29 +597,34 @@ class CurriculumTrainer:
 
     def train(
         self,
-        num_iterations: int = 50,
+        num_iterations: int = 1000,
         games_per_iteration: Optional[int] = None,
         training_steps: Optional[int] = None,
         batch_size: int = 256,
         show_progress: bool = True,
         checkpoint_dir: Optional[str] = None,
         checkpoint_interval: int = 10,
+        early_stop: bool = True,
+        early_stop_wins: int = 3,
     ) -> List[dict]:
         """Run full curriculum training.
 
         Args:
-            num_iterations: Number of training iterations.
+            num_iterations: Maximum training iterations (default high for early stopping).
             games_per_iteration: Games per iteration.
             training_steps: Training steps per iteration.
             batch_size: Batch size.
             show_progress: Whether to show progress.
             checkpoint_dir: Directory for checkpoints.
             checkpoint_interval: Save every N iterations.
+            early_stop: Stop when max depth is mastered.
+            early_stop_wins: Consecutive wins at max depth to trigger early stop.
 
         Returns:
             Training history.
         """
         history = []
+        max_depth_wins = 0  # Track consecutive winning iterations at max depth
 
         if checkpoint_dir:
             os.makedirs(checkpoint_dir, exist_ok=True)
@@ -349,7 +634,7 @@ class CurriculumTrainer:
         for iteration in range(1, num_iterations + 1):
             if show_progress:
                 print(f"\n{'='*50}")
-                print(f"Curriculum Iteration {iteration}/{num_iterations} (Stockfish depth {self.current_depth})")
+                print(f"Curriculum Iteration {iteration} (Stockfish depth {self.current_depth}/{self.max_depth})")
                 print(f"{'='*50}")
 
             stats = self.train_iteration(
@@ -371,6 +656,19 @@ class CurriculumTrainer:
                           f"value={stats['avg_value_loss']:.4f}")
                 if stats["promoted"]:
                     print(f"*** PROMOTED to depth {self.current_depth}! ***")
+
+            # Early stopping: check if we've mastered max depth
+            if early_stop and self.current_depth >= self.max_depth:
+                if stats["win_rate"] >= self.promotion_threshold:
+                    max_depth_wins += 1
+                    if show_progress:
+                        print(f"Max depth win streak: {max_depth_wins}/{early_stop_wins}")
+                    if max_depth_wins >= early_stop_wins:
+                        if show_progress:
+                            print(f"\n*** EARLY STOP: Mastered Stockfish depth {self.max_depth}! ***")
+                        break
+                else:
+                    max_depth_wins = 0  # Reset streak on loss
 
             # Save checkpoint
             if checkpoint_dir and iteration % checkpoint_interval == 0:

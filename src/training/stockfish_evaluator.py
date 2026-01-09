@@ -19,6 +19,8 @@ class StockfishEvaluator:
         limit_strength: Optional[bool] = None,
         elo: Optional[int] = None,
         skill_level: Optional[int] = None,
+        hash_mb: Optional[int] = None,
+        threads: Optional[int] = None,
     ):
         """Initialize Stockfish evaluator.
 
@@ -30,6 +32,8 @@ class StockfishEvaluator:
             limit_strength: Enable UCI_LimitStrength if supported.
             elo: Target UCI_Elo if supported.
             skill_level: Target Skill Level if supported.
+            hash_mb: Hash table size in MB (larger = faster for deep searches).
+            threads: Number of threads for Stockfish (1 recommended when using multiprocessing).
         """
         self.depth = depth
         self.time_limit = time_limit
@@ -47,14 +51,17 @@ class StockfishEvaluator:
                 "Windows: Download from stockfishchess.org"
             )
 
+        self.stockfish_path = stockfish_path
         self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
-        self._configure_engine(limit_strength, elo, skill_level)
+        self._configure_engine(limit_strength, elo, skill_level, hash_mb, threads)
 
     def _configure_engine(
         self,
         limit_strength: Optional[bool],
         elo: Optional[int],
         skill_level: Optional[int],
+        hash_mb: Optional[int] = None,
+        threads: Optional[int] = None,
     ) -> None:
         """Configure optional strength limits if supported by the engine."""
         options = self.engine.options
@@ -65,6 +72,10 @@ class StockfishEvaluator:
             config["UCI_Elo"] = int(elo)
         if skill_level is not None and "Skill Level" in options:
             config["Skill Level"] = int(skill_level)
+        if hash_mb is not None and "Hash" in options:
+            config["Hash"] = int(hash_mb)
+        if threads is not None and "Threads" in options:
+            config["Threads"] = int(threads)
         if config:
             self.engine.configure(config)
 

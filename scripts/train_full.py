@@ -87,6 +87,15 @@ Examples:
         """
     )
 
+    # Model size presets
+    parser.add_argument(
+        "--model-size",
+        type=str,
+        choices=["small", "medium", "large"],
+        default=None,
+        help="Model size preset: small (~600K), medium (~2.5M), large (~10M params)",
+    )
+
     # General options
     parser.add_argument(
         "--checkpoint-dir",
@@ -122,8 +131,8 @@ Examples:
     parser.add_argument(
         "--p1-iterations",
         type=int,
-        default=20,
-        help="Phase 1: Number of supervised iterations (default: 20)",
+        default=50,
+        help="Phase 1: Number of supervised iterations (default: 50)",
     )
     parser.add_argument(
         "--p1-batches",
@@ -140,8 +149,8 @@ Examples:
     parser.add_argument(
         "--p1-depth",
         type=int,
-        default=10,
-        help="Phase 1: Stockfish depth for training data (default: 10)",
+        default=8,
+        help="Phase 1: Stockfish depth for training data (default: 8)",
     )
     parser.add_argument(
         "--p1-cache-dir",
@@ -177,8 +186,13 @@ Examples:
     parser.add_argument(
         "--p2-iterations",
         type=int,
-        default=50,
-        help="Phase 2: Number of curriculum iterations (default: 50)",
+        default=1000,
+        help="Phase 2: Max iterations, will early stop when mastered (default: 1000)",
+    )
+    parser.add_argument(
+        "--p2-no-early-stop",
+        action="store_true",
+        help="Phase 2: Disable early stopping, run all iterations",
     )
     parser.add_argument(
         "--p2-games",
@@ -195,8 +209,8 @@ Examples:
     parser.add_argument(
         "--p2-max-depth",
         type=int,
-        default=6,
-        help="Phase 2: Maximum Stockfish depth (default: 6)",
+        default=12,
+        help="Phase 2: Maximum Stockfish depth (default: 12, ~2500 Elo)",
     )
     parser.add_argument(
         "--p2-simulations",
@@ -227,6 +241,12 @@ Examples:
         type=float,
         default=None,
         help="Phase 2: Blend weight for Stockfish value targets (0-1)",
+    )
+    parser.add_argument(
+        "--p2-parallel",
+        type=int,
+        default=None,
+        help="Phase 2: Number of parallel games for batched inference (default: 4)",
     )
 
     # Phase 3: Self-Play
@@ -299,6 +319,32 @@ Examples:
     # Initialize config
     config = Config()
 
+    # Apply model size preset
+    if args.model_size == "small":
+        config.residual_blocks = 4
+        config.residual_filters = 64
+        config.value_hidden = 64
+        config.policy_channels = 2   # Minimal policy head
+        config.value_channels = 1    # Minimal value head
+        config.use_se_blocks = False
+        print("Using SMALL model (~600K params)")
+    elif args.model_size == "medium":
+        config.residual_blocks = 8
+        config.residual_filters = 128
+        config.value_hidden = 128
+        config.policy_channels = 8
+        config.value_channels = 8
+        config.use_se_blocks = True
+        print("Using MEDIUM model (~2.5M params)")
+    elif args.model_size == "large":
+        config.residual_blocks = 12
+        config.residual_filters = 192
+        config.value_hidden = 256
+        config.policy_channels = 32
+        config.value_channels = 32
+        config.use_se_blocks = True
+        print("Using LARGE model (~10M params)")
+
     # Apply config overrides
     if args.p1_no_cache:
         config.supervised_cache_enabled = False
@@ -329,6 +375,8 @@ Examples:
         config.curriculum_policy_weight = args.p2_policy_weight
     if args.p2_value_weight is not None:
         config.curriculum_value_weight = args.p2_value_weight
+    if args.p2_parallel is not None:
+        config.curriculum_num_parallel = args.p2_parallel
 
     # Resume from checkpoint if specified
     if args.resume:
@@ -361,6 +409,7 @@ Examples:
             training_steps=args.p2_training_steps,
             max_depth=args.p2_max_depth,
             num_simulations=args.p2_simulations,
+            early_stop=not args.p2_no_early_stop,
         )
 
     # Phase 3: Self-Play

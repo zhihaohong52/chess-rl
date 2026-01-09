@@ -50,9 +50,17 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic usage (auto-detects CPU cores)
   python scripts/precompute_supervised_cache.py
-  python scripts/precompute_supervised_cache.py --cache-size 50000 --cache-dtype float16
-  python scripts/precompute_supervised_cache.py --stockfish /path/to/stockfish --depth 8
+
+  # Fast mode: random positions + lower depth (recommended for large caches)
+  python scripts/precompute_supervised_cache.py --position-source random --depth 8
+
+  # Custom cache size
+  python scripts/precompute_supervised_cache.py --cache-size 50000
+
+  # Control parallelism explicitly
+  python scripts/precompute_supervised_cache.py --workers 8 --batch-size 32
         """,
     )
 
@@ -135,6 +143,18 @@ Examples:
         default=None,
         help="Softmax temperature for Stockfish policy labels (default: config)",
     )
+    parser.add_argument(
+        "--hash",
+        type=int,
+        default=None,
+        help="Stockfish hash table size in MB per worker (default: 16)",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Stockfish threads per worker (default: 1, best for multiprocessing)",
+    )
 
     args = parser.parse_args()
 
@@ -162,6 +182,10 @@ Examples:
         config.supervised_position_temperature = args.position_temperature
     if args.policy_temperature is not None:
         config.supervised_policy_temperature = args.policy_temperature
+    if args.hash is not None:
+        config.stockfish_hash_mb = args.hash
+    if args.threads is not None:
+        config.stockfish_threads = args.threads
 
     stockfish_path = args.stockfish or find_stockfish()
     if stockfish_path is None:
@@ -173,6 +197,9 @@ Examples:
 
     depth = args.depth if args.depth is not None else 10
 
+    hash_mb = getattr(config, "stockfish_hash_mb", 16)
+    threads = getattr(config, "stockfish_threads", 1)
+
     print("=" * 60)
     print("Chess RL - Supervised Cache Precompute")
     print("=" * 60)
@@ -181,8 +208,15 @@ Examples:
     print(f"Cache dtype: {config.supervised_cache_dtype}")
     print(f"Cache workers: {config.supervised_cache_workers}")
     print(f"Cache batch size: {config.supervised_cache_batch_size}")
+    print(f"Position source: {config.supervised_position_source}")
     print(f"Stockfish path: {stockfish_path}")
     print(f"Stockfish depth: {depth}")
+    print(f"Stockfish hash: {hash_mb} MB per worker")
+    print(f"Stockfish threads: {threads} per worker")
+    if config.supervised_position_source == "stockfish":
+        print()
+        print("TIP: Use --position-source random for ~10x faster cache generation.")
+        print("     Random positions still get Stockfish policy/value labels.")
     print()
 
     network = ChessNetwork(config)
