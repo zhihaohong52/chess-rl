@@ -57,6 +57,8 @@ class Config:
     supervised_cache_size = 20000
     supervised_cache_dtype = "float16"
     supervised_cache_rebuild = False
+    supervised_cache_workers = 1
+    supervised_cache_batch_size = 512
 
     # Curriculum learning (Phase 2)
     curriculum_games_per_iteration = 40

@@ -81,6 +81,18 @@ Examples:
         help="Number of cached supervised examples (default: config)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of worker processes for cache build (default: config)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Per-worker batch size for cache build (default: config)",
+    )
+    parser.add_argument(
         "--cache-dtype",
         type=str,
         choices=["float16", "float32"],
@@ -132,6 +144,10 @@ Examples:
         config.supervised_cache_dir = args.cache_dir
     if args.cache_size is not None:
         config.supervised_cache_size = args.cache_size
+    if args.workers is not None:
+        config.supervised_cache_workers = args.workers
+    if args.batch_size is not None:
+        config.supervised_cache_batch_size = args.batch_size
     if args.cache_dtype is not None:
         config.supervised_cache_dtype = args.cache_dtype
     if args.rebuild:
@@ -163,6 +179,8 @@ Examples:
     print(f"Cache dir: {config.supervised_cache_dir}")
     print(f"Cache size: {config.supervised_cache_size}")
     print(f"Cache dtype: {config.supervised_cache_dtype}")
+    print(f"Cache workers: {config.supervised_cache_workers}")
+    print(f"Cache batch size: {config.supervised_cache_batch_size}")
     print(f"Stockfish path: {stockfish_path}")
     print(f"Stockfish depth: {depth}")
     print()
@@ -177,6 +195,12 @@ Examples:
     trainer.close()
 
     print(f"Cache ready: {config.supervised_cache_dir} ({trainer.cache_count} examples)")
+    if trainer.cache_build_throughput is not None:
+        print(
+            "Build throughput: "
+            f"{trainer.cache_build_throughput:.1f} samples/sec "
+            f"({trainer.cache_build_workers} workers)"
+        )
     return 0
 
 
