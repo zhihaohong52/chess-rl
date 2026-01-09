@@ -15,27 +15,7 @@ from src.game.move_encoder import get_move_encoder
 
 
 class ChessNetwork:
-    """Lightweight neural network with policy and value heads.
-
-    Architecture:
-        Input (781)
-            |
-        Dense(512) + ReLU
-            |
-        Dense(512) + ReLU
-            |
-        Dense(256) + ReLU
-            |
-        Dense(256) + ReLU
-            |
-        +---------------+
-        |               |
-    Policy Head    Value Head
-        |               |
-    Dense(policy_size)  Dense(64) + ReLU
-        |               |
-    Softmax         Dense(1) + tanh
-    """
+    """Lightweight residual CNN with policy and value heads."""
 
     def __init__(self, config: Optional[Config] = None):
         """Initialize the network.
@@ -49,33 +29,58 @@ class ChessNetwork:
         self.model = self._build_model()
         self._predict_fn = None  # Cached compiled prediction function
 
-    def _build_model(self) -> keras.Model:
-        """Build the neural network model with batch normalization."""
-        # Input layer
-        inputs = layers.Input(shape=(Config.input_size,), name="board_input")
+        print(self.model.summary())
 
-        # Shared hidden layers with batch normalization
-        x = inputs
-        for i, units in enumerate(self.config.hidden_layers):
-            x = layers.Dense(units, name=f"hidden_{i}")(x)
-            x = layers.BatchNormalization(name=f"bn_{i}")(x)
-            x = layers.ReLU(name=f"relu_{i}")(x)
+    def _residual_block(self, x: tf.Tensor, filters: int, idx: int) -> tf.Tensor:
+        """Residual block with two 3x3 convolutions."""
+        shortcut = x
+        x = layers.Conv2D(filters, 3, padding="same", use_bias=False, name=f"res{idx}_conv1")(x)
+        x = layers.BatchNormalization(name=f"res{idx}_bn1")(x)
+        x = layers.ReLU(name=f"res{idx}_relu1")(x)
+        x = layers.Conv2D(filters, 3, padding="same", use_bias=False, name=f"res{idx}_conv2")(x)
+        x = layers.BatchNormalization(name=f"res{idx}_bn2")(x)
+        x = layers.Add(name=f"res{idx}_add")([shortcut, x])
+        x = layers.ReLU(name=f"res{idx}_relu2")(x)
+        return x
+
+    def _build_model(self) -> keras.Model:
+        """Build the residual CNN model."""
+        inputs = layers.Input(shape=self.config.input_shape, name="board_input")
+
+        x = layers.Conv2D(
+            self.config.residual_filters,
+            3,
+            padding="same",
+            use_bias=False,
+            name="stem_conv",
+        )(inputs)
+        x = layers.BatchNormalization(name="stem_bn")(x)
+        x = layers.ReLU(name="stem_relu")(x)
+
+        for i in range(self.config.residual_blocks):
+            x = self._residual_block(x, self.config.residual_filters, i)
 
         # Policy head
-        policy = layers.Dense(self.policy_size, name="policy_logits")(x)
+        policy = layers.Conv2D(2, 1, use_bias=False, name="policy_conv")(x)
+        policy = layers.BatchNormalization(name="policy_bn")(policy)
+        policy = layers.ReLU(name="policy_relu")(policy)
+        policy = layers.Flatten(name="policy_flatten")(policy)
+        policy = layers.Dense(self.policy_size, name="policy_logits")(policy)
         policy_output = layers.Softmax(name="policy")(policy)
 
-        # Value head with batch norm
-        value = layers.Dense(self.config.value_hidden, name="value_dense")(x)
+        # Value head
+        value = layers.Conv2D(1, 1, use_bias=False, name="value_conv")(x)
         value = layers.BatchNormalization(name="value_bn")(value)
         value = layers.ReLU(name="value_relu")(value)
+        value = layers.Flatten(name="value_flatten")(value)
+        value = layers.Dense(self.config.value_hidden, activation="relu", name="value_dense")(value)
         value_output = layers.Dense(1, activation="tanh", name="value")(value)
 
         model = keras.Model(inputs=inputs, outputs=[policy_output, value_output])
         return model
 
-    def compile(self, learning_rate: Optional[float] = None, use_schedule: bool = False,
-                total_steps: int = 50000):
+    def compile(self, learning_rate: Optional[float] = None, use_schedule: Optional[bool] = None,
+                total_steps: Optional[int] = None):
         """Compile the model with optimizer and loss functions.
 
         Args:
@@ -84,22 +89,28 @@ class ChessNetwork:
             total_steps: Total training steps for LR schedule.
         """
         lr = learning_rate or self.config.learning_rate
+        use_schedule = self.config.use_lr_schedule if use_schedule is None else use_schedule
+        total_steps = total_steps or self.config.lr_total_steps
 
         if use_schedule:
             # Cosine decay with warmup
             lr = keras.optimizers.schedules.CosineDecay(
                 initial_learning_rate=lr,
                 decay_steps=total_steps,
-                alpha=0.01  # Final LR = initial * 0.01
+                alpha=self.config.lr_final_alpha
             )
 
-        optimizer = keras.optimizers.Adam(learning_rate=lr, clipnorm=1.0)
+        optimizer = keras.optimizers.AdamW(
+            learning_rate=lr,
+            weight_decay=self.config.weight_decay,
+            clipnorm=1.0,
+        )
 
         self.model.compile(
             optimizer=optimizer,
             loss={
                 "policy": keras.losses.CategoricalCrossentropy(from_logits=False),
-                "value": keras.losses.MeanSquaredError(),
+                "value": keras.losses.Huber(),
             },
             loss_weights={"policy": 1.0, "value": 1.0},
         )
@@ -115,14 +126,14 @@ class ChessNetwork:
         Uses direct model call instead of model.predict() for 10-50x speedup.
 
         Args:
-            state: Board state as a 781-dimensional vector.
+            state: Board state as an 8x8xN tensor.
 
         Returns:
             Tuple of (policy, value) where policy is a probability distribution
             over moves and value is a scalar.
         """
-        if state.ndim == 1:
-            state = state.reshape(1, -1)
+        if state.ndim == 3:
+            state = np.expand_dims(state, axis=0)
 
         state_tensor = tf.constant(state, dtype=tf.float32)
         policy, value = self._fast_predict(state_tensor)
@@ -132,7 +143,7 @@ class ChessNetwork:
         """Predict policy and value for a batch of states.
 
         Args:
-            states: Batch of board states, shape (batch_size, 781).
+            states: Batch of board states, shape (batch_size, 8, 8, planes).
 
         Returns:
             Tuple of (policies, values) where policies has shape (batch_size, policy_size)
@@ -151,7 +162,7 @@ class ChessNetwork:
         """Train the network on a single batch.
 
         Args:
-            states: Batch of board states, shape (batch_size, 781).
+            states: Batch of board states, shape (batch_size, 8, 8, planes).
             target_policies: Target policy distributions, shape (batch_size, policy_size).
             target_values: Target values, shape (batch_size,).
 

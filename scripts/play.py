@@ -63,7 +63,7 @@ def play_game(network, player_color: bool, num_simulations: int = 400):
         else:
             # AI's turn
             print("AI is thinking...")
-            action, policy = mcts.get_action(game, temperature=0.1)
+            action, policy, _ = mcts.get_action(game, temperature=0.1)
 
             if action < 0:
                 print("AI has no legal moves.")
@@ -113,7 +113,7 @@ def watch_game(network, num_simulations: int = 400, max_moves: int = 200):
     move_history = []
 
     while not game.is_terminal() and game.move_count < max_moves:
-        action, _ = mcts.get_action(game, temperature=0.1)
+        action, _, _ = mcts.get_action(game, temperature=0.1)
 
         if action < 0:
             break

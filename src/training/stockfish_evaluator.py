@@ -8,18 +8,32 @@ import os
 
 
 class StockfishEvaluator:
-    """Interface to Stockfish for position evaluation and best move generation."""
+    """Interface to Stockfish for position evaluation and move generation."""
 
-    def __init__(self, stockfish_path: Optional[str] = None, depth: int = 10, time_limit: float = 0.1):
+    def __init__(
+        self,
+        stockfish_path: Optional[str] = None,
+        depth: int = 10,
+        time_limit: float = 0.1,
+        multipv: int = 1,
+        limit_strength: Optional[bool] = None,
+        elo: Optional[int] = None,
+        skill_level: Optional[int] = None,
+    ):
         """Initialize Stockfish evaluator.
 
         Args:
             stockfish_path: Path to Stockfish executable. If None, tries common locations.
             depth: Search depth for evaluation.
             time_limit: Time limit per move in seconds.
+            multipv: Number of candidate moves to return for policy targets.
+            limit_strength: Enable UCI_LimitStrength if supported.
+            elo: Target UCI_Elo if supported.
+            skill_level: Target Skill Level if supported.
         """
         self.depth = depth
         self.time_limit = time_limit
+        self.multipv = multipv
 
         # Find Stockfish
         if stockfish_path is None:
@@ -34,6 +48,25 @@ class StockfishEvaluator:
             )
 
         self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+        self._configure_engine(limit_strength, elo, skill_level)
+
+    def _configure_engine(
+        self,
+        limit_strength: Optional[bool],
+        elo: Optional[int],
+        skill_level: Optional[int],
+    ) -> None:
+        """Configure optional strength limits if supported by the engine."""
+        options = self.engine.options
+        config = {}
+        if limit_strength is not None and "UCI_LimitStrength" in options:
+            config["UCI_LimitStrength"] = limit_strength
+        if elo is not None and "UCI_Elo" in options:
+            config["UCI_Elo"] = int(elo)
+        if skill_level is not None and "Skill Level" in options:
+            config["Skill Level"] = int(skill_level)
+        if config:
+            self.engine.configure(config)
 
     def _find_stockfish(self) -> Optional[str]:
         """Try to find Stockfish in common locations."""
@@ -157,6 +190,79 @@ class StockfishEvaluator:
             Stockfish's move.
         """
         return self.get_best_move(board)
+
+    def _score_to_cp(self, score: chess.engine.PovScore) -> int:
+        """Convert a python-chess score to centipawns with mate handling."""
+        if score.is_mate():
+            mate_in = score.mate()
+            return 10000 if mate_in and mate_in > 0 else -10000
+        cp = score.score()
+        return int(cp) if cp is not None else 0
+
+    def get_policy_and_value(
+        self,
+        board: chess.Board,
+        multipv: Optional[int] = None,
+        policy_temperature: float = 1.0,
+    ) -> Tuple[List[Tuple[chess.Move, float]], float]:
+        """Get a move distribution (MultiPV) and value for a position.
+
+        Args:
+            board: Chess position.
+            multipv: Number of top moves to request.
+            policy_temperature: Temperature for softmax over scores.
+
+        Returns:
+            Tuple of ([(move, prob), ...], value) where value is in [-1, 1].
+        """
+        if board.is_game_over():
+            return [], 0.0
+
+        multipv = multipv or self.multipv
+        try:
+            infos = self.engine.analyse(
+                board,
+                chess.engine.Limit(depth=self.depth, time=self.time_limit),
+                multipv=multipv,
+            )
+        except Exception:
+            infos = self.engine.analyse(
+                board,
+                chess.engine.Limit(depth=self.depth, time=self.time_limit),
+            )
+
+        if isinstance(infos, dict):
+            infos = [infos]
+
+        moves = []
+        scores = []
+
+        for info in infos:
+            move = None
+            if "pv" in info and info["pv"]:
+                move = info["pv"][0]
+            elif "move" in info:
+                move = info["move"]
+
+            if move is None or "score" not in info:
+                continue
+
+            cp = self._score_to_cp(info["score"].relative)
+            moves.append(move)
+            scores.append(cp)
+
+        if not moves:
+            return [], 0.0
+
+        score_array = np.clip(np.array(scores, dtype=np.float32), -10000, 10000)
+        denom = max(1e-3, 400.0 * max(policy_temperature, 1e-3))
+        logits = score_array / denom
+        logits = logits - np.max(logits)
+        probs = np.exp(logits)
+        probs = probs / probs.sum()
+
+        value = float(np.tanh(score_array[0] / 400.0))
+        return list(zip(moves, probs.tolist())), value
 
     def set_depth(self, depth: int):
         """Change the search depth."""

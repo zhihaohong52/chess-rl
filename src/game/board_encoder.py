@@ -1,34 +1,25 @@
-"""Board encoder: converts chess.Board to 781-dimensional input vector."""
+"""Board encoder: converts chess.Board to an 8x8xN plane representation."""
 
 import numpy as np
 import chess
+from typing import Optional
+
+from config import Config
 
 
 class BoardEncoder:
-    """Encodes a chess board state into a 781-dimensional flat vector.
+    """Encodes a chess board state into an 8x8xN stack of planes.
 
-    Layout:
-        0-63:    White Pawns bitboard
-        64-127:  White Knights bitboard
-        128-191: White Bishops bitboard
-        192-255: White Rooks bitboard
-        256-319: White Queens bitboard
-        320-383: White King bitboard
-        384-447: Black Pawns bitboard
-        448-511: Black Knights bitboard
-        512-575: Black Bishops bitboard
-        576-639: Black Rooks bitboard
-        640-703: Black Queens bitboard
-        704-767: Black King bitboard
-        768:     White kingside castling right
-        769:     White queenside castling right
-        770:     Black kingside castling right
-        771:     Black queenside castling right
-        772-779: En passant file (one-hot, 8 values)
-        780:     Side to move (1=white, 0=black)
+    Planes:
+        - 12 planes per historical position (piece bitboards)
+        - 4 castling planes
+        - 1 side-to-move plane
+        - 1 repetition plane
+        - 1 move-count plane (normalized)
+        - 1 en passant plane (single square, optional)
     """
 
-    INPUT_SIZE = 781
+    INPUT_SHAPE = Config.input_shape
 
     # Piece types in order for encoding
     PIECE_ORDER = [
@@ -47,49 +38,74 @@ class BoardEncoder:
     ]
 
     @staticmethod
-    def encode(board: chess.Board) -> np.ndarray:
-        """Encode a chess board into a 781-dimensional vector.
+    def _encode_pieces(planes: np.ndarray, board: chess.Board, offset: int) -> None:
+        """Encode piece planes for a single board into the plane stack."""
+        for i, (color, piece_type) in enumerate(BoardEncoder.PIECE_ORDER):
+            plane_idx = offset + i
+            for square in board.pieces(piece_type, color):
+                rank = chess.square_rank(square)
+                file = chess.square_file(square)
+                planes[plane_idx, rank, file] = 1.0
+
+    @staticmethod
+    def encode(
+        board: chess.Board,
+        history: list = None,
+        move_count: Optional[int] = None,
+    ) -> np.ndarray:
+        """Encode a chess board into an 8x8xN tensor (channels last).
 
         Args:
-            board: A python-chess Board object.
+            board: A python-chess Board object (current position).
+            history: Optional list of past boards, oldest->newest (including current).
+            move_count: Move count (plies) for normalization.
 
         Returns:
-            A numpy array of shape (781,) with float32 values (0 or 1).
+            A numpy array of shape (8, 8, planes) with float32 values.
         """
-        encoding = np.zeros(781, dtype=np.float32)
+        planes = np.zeros((Config.input_planes, 8, 8), dtype=np.float32)
 
-        # Encode piece bitboards (12 * 64 = 768 values)
-        for i, (color, piece_type) in enumerate(BoardEncoder.PIECE_ORDER):
-            bitboard = board.pieces_mask(piece_type, color)
-            offset = i * 64
-            for square in range(64):
-                if bitboard & (1 << square):
-                    encoding[offset + square] = 1.0
+        history_boards = history or [board]
+        history_boards = history_boards[-Config.history_length:]
 
-        # Encode castling rights (4 values at positions 768-771)
-        encoding[768] = float(board.has_kingside_castling_rights(chess.WHITE))
-        encoding[769] = float(board.has_queenside_castling_rights(chess.WHITE))
-        encoding[770] = float(board.has_kingside_castling_rights(chess.BLACK))
-        encoding[771] = float(board.has_queenside_castling_rights(chess.BLACK))
+        # Encode current position and history (most recent first)
+        for h in range(Config.history_length):
+            if h >= len(history_boards):
+                break
+            hist_board = history_boards[-1 - h]
+            BoardEncoder._encode_pieces(planes, hist_board, offset=h * 12)
 
-        # Encode en passant file (8 values at positions 772-779, one-hot)
-        if board.ep_square is not None:
-            ep_file = chess.square_file(board.ep_square)
-            encoding[772 + ep_file] = 1.0
+        offset = 12 * Config.history_length
 
-        # Encode side to move (1 value at position 780)
-        encoding[780] = float(board.turn == chess.WHITE)
+        # Castling rights
+        planes[offset + 0, :, :] = float(board.has_kingside_castling_rights(chess.WHITE))
+        planes[offset + 1, :, :] = float(board.has_queenside_castling_rights(chess.WHITE))
+        planes[offset + 2, :, :] = float(board.has_kingside_castling_rights(chess.BLACK))
+        planes[offset + 3, :, :] = float(board.has_queenside_castling_rights(chess.BLACK))
 
-        return encoding
+        # Side to move
+        planes[offset + 4, :, :] = float(board.turn == chess.WHITE)
+
+        # Repetition flag (threefold claim)
+        planes[offset + 5, :, :] = float(board.can_claim_threefold_repetition())
+
+        # Move count plane (normalized)
+        if move_count is None:
+            move_count = max(0, (board.fullmove_number - 1) * 2 + (0 if board.turn == chess.WHITE else 1))
+        planes[offset + 6, :, :] = min(float(move_count) / float(Config.max_moves), 1.0)
+
+        # En passant square (optional)
+        if Config.include_ep_plane:
+            ep_plane = offset + 7
+            if board.ep_square is not None:
+                rank = chess.square_rank(board.ep_square)
+                file = chess.square_file(board.ep_square)
+                planes[ep_plane, rank, file] = 1.0
+
+        # Convert to channels-last (8, 8, planes)
+        return np.transpose(planes, (1, 2, 0))
 
     @staticmethod
     def encode_batch(boards: list) -> np.ndarray:
-        """Encode multiple boards into a batch.
-
-        Args:
-            boards: List of python-chess Board objects.
-
-        Returns:
-            A numpy array of shape (len(boards), 781).
-        """
+        """Encode multiple boards into a batch (no history)."""
         return np.array([BoardEncoder.encode(b) for b in boards], dtype=np.float32)

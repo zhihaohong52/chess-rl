@@ -1,9 +1,9 @@
 """Experience replay buffer for storing training examples."""
 
 import numpy as np
-from collections import deque
-from typing import Tuple, List, Optional
-import random
+from typing import Tuple, List
+
+from config import Config
 
 
 def mirror_square(sq: int) -> int:
@@ -16,22 +16,29 @@ def mirror_square(sq: int) -> int:
 def mirror_state(state: np.ndarray) -> np.ndarray:
     """Mirror a board state horizontally.
 
-    Flips all bitboards so that files a-h become h-a.
+    Supports both legacy flat vectors and 8x8xN plane tensors.
     """
-    mirrored = state.copy()
+    if state.ndim == 1:
+        mirrored = state.copy()
 
-    # Mirror each of the 12 bitboards (768 values)
-    for i in range(12):
-        offset = i * 64
-        for sq in range(64):
-            mirrored[offset + mirror_square(sq)] = state[offset + sq]
+        # Mirror each of the 12 bitboards (768 values)
+        for i in range(12):
+            offset = i * 64
+            for sq in range(64):
+                mirrored[offset + mirror_square(sq)] = state[offset + sq]
 
-    # En passant file (positions 772-779) also needs to be mirrored
-    ep_original = state[772:780].copy()
-    for i in range(8):
-        mirrored[772 + (7 - i)] = ep_original[i]
+        # En passant file (positions 772-779) also needs to be mirrored
+        ep_original = state[772:780].copy()
+        for i in range(8):
+            mirrored[772 + (7 - i)] = ep_original[i]
 
-    return mirrored
+        return mirrored
+
+    if state.ndim == 3:
+        # Channels-last (8, 8, planes): flip file axis
+        return state[:, ::-1, :].copy()
+
+    raise ValueError(f"Unsupported state shape for mirroring: {state.shape}")
 
 
 def mirror_policy(policy: np.ndarray, move_encoder) -> np.ndarray:
@@ -63,25 +70,26 @@ class ReplayBuffer:
     """Replay buffer using numpy arrays for fast sampling.
 
     Each example is a tuple of (state, policy, value):
-    - state: Board state as 781-dim vector
+    - state: Board state as 8x8xN tensor
     - policy: Target policy distribution
     - value: Target value (-1 to 1)
     """
 
-    def __init__(self, max_size: int = 100000, state_size: int = 781, policy_size: int = 1924):
+    def __init__(self, max_size: int = 100000, state_shape: Tuple[int, ...] = Config.input_shape,
+                 policy_size: int = 1924):
         """Initialize the replay buffer.
 
         Args:
             max_size: Maximum number of examples to store.
-            state_size: Size of state vector.
+            state_shape: Shape of state tensor.
             policy_size: Size of policy vector.
         """
         self.max_size = max_size
-        self.state_size = state_size
+        self.state_shape = state_shape
         self.policy_size = policy_size
 
         # Pre-allocate numpy arrays
-        self.states = np.zeros((max_size, state_size), dtype=np.float32)
+        self.states = np.zeros((max_size, *state_shape), dtype=np.float32)
         self.policies = np.zeros((max_size, policy_size), dtype=np.float32)
         self.values = np.zeros(max_size, dtype=np.float32)
 

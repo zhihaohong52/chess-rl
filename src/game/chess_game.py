@@ -1,11 +1,14 @@
 """Chess game wrapper around python-chess."""
 
 import chess
-import numpy as np
-from typing import Optional, List, Tuple
+from typing import Optional, List
+from collections import deque
+
+from config import Config
 from .board_encoder import BoardEncoder
 from .move_encoder import MoveEncoder, get_move_encoder
 
+import numpy as np
 
 class ChessGame:
     """Wrapper around python-chess for RL training."""
@@ -23,17 +26,20 @@ class ChessGame:
             self.board = chess.Board()
         self.move_encoder = get_move_encoder()
         self.move_history: List[chess.Move] = []
+        self.board_history = deque(maxlen=Config.history_length)
+        self.board_history.append(self.board.copy())
 
     def clone(self) -> "ChessGame":
         """Create a deep copy of the game."""
         game = ChessGame()
         game.board = self.board.copy()
         game.move_history = self.move_history.copy()
+        game.board_history = deque((b.copy() for b in self.board_history), maxlen=Config.history_length)
         return game
 
     def get_state(self) -> np.ndarray:
-        """Get the current board state as a 781-dimensional vector."""
-        return BoardEncoder.encode(self.board)
+        """Get the current board state as an 8x8xN tensor."""
+        return BoardEncoder.encode(self.board, history=list(self.board_history), move_count=self.move_count)
 
     def get_legal_moves(self) -> List[chess.Move]:
         """Get list of legal moves in the current position."""
@@ -55,6 +61,7 @@ class ChessGame:
         """
         self.move_history.append(move)
         self.board.push(move)
+        self.board_history.append(self.board.copy())
 
     def apply_move_index(self, move_idx: int) -> None:
         """Apply a move by its index.

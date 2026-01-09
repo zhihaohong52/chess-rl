@@ -41,7 +41,7 @@ class SelfPlay:
         game = ChessGame()
         mcts = MCTS(self.network, self.config, self.num_simulations)
 
-        # Store (state, policy, current_player) during game
+        # Store (state, policy, current_player, root_value) during game
         game_history = []
 
         move_count = 0
@@ -55,8 +55,9 @@ class SelfPlay:
                 temperature = 0.1  # Near-greedy after threshold
 
             # Run MCTS and get action
-            action, policy = mcts.get_action(
-                game, temperature=temperature, add_noise=True
+            add_noise = game.move_count < self.config.dirichlet_moves
+            action, policy, root_value = mcts.get_action(
+                game, temperature=temperature, add_noise=add_noise
             )
 
             if action < 0:
@@ -65,7 +66,7 @@ class SelfPlay:
 
             # Store example with current player
             current_player = game.turn  # True = White
-            game_history.append((state, policy, current_player))
+            game_history.append((state, policy, current_player, root_value))
 
             # Apply move
             game.apply_move_index(action)
@@ -76,12 +77,16 @@ class SelfPlay:
 
         # Create final training examples with proper values
         examples = []
-        for state, policy, player_was_white in game_history:
+        for state, policy, player_was_white, root_value in game_history:
             # Value from the perspective of the player who made the move
             if player_was_white:
-                value = outcome
+                outcome_value = outcome
             else:
-                value = -outcome
+                outcome_value = -outcome
+            value = (
+                (1.0 - self.config.value_target_mix) * outcome_value
+                + self.config.value_target_mix * root_value
+            )
             examples.append((state, policy, value))
 
         return examples
@@ -130,24 +135,26 @@ class SelfPlay:
             else:
                 temperature = 0.1
 
-            action, policy = mcts.get_action(game, temperature=temperature, add_noise=True)
+            add_noise = game.move_count < self.config.dirichlet_moves
+            action, policy, root_value = mcts.get_action(game, temperature=temperature, add_noise=add_noise)
 
             if action < 0:
                 break
 
             current_player = game.turn
-            game_history.append((state, policy, current_player))
+            game_history.append((state, policy, current_player, root_value))
             game.apply_move_index(action)
             move_count += 1
 
         outcome = game.get_outcome()
 
         examples = []
-        for state, policy, player_was_white in game_history:
-            if player_was_white:
-                value = outcome
-            else:
-                value = -outcome
+        for state, policy, player_was_white, root_value in game_history:
+            outcome_value = outcome if player_was_white else -outcome
+            value = (
+                (1.0 - self.config.value_target_mix) * outcome_value
+                + self.config.value_target_mix * root_value
+            )
             examples.append((state, policy, value))
 
         stats = {

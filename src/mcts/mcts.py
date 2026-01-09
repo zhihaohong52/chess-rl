@@ -32,7 +32,7 @@ class MCTS:
         self.num_simulations = num_simulations or self.config.num_simulations
         self.c_puct = self.config.c_puct
 
-    def search(self, game: ChessGame, add_noise: bool = False) -> Tuple[list, np.ndarray]:
+    def search(self, game: ChessGame, add_noise: bool = False) -> Tuple[list, np.ndarray, float]:
         """Run MCTS from the current position.
 
         Args:
@@ -40,7 +40,7 @@ class MCTS:
             add_noise: Whether to add Dirichlet noise to root priors.
 
         Returns:
-            Tuple of (move_indices, probabilities) representing the search policy.
+            Tuple of (move_indices, probabilities, root_value) representing the search policy.
         """
         # Initialize root node
         root = Node(prior=0)
@@ -51,7 +51,7 @@ class MCTS:
         legal_moves = game.get_legal_move_indices()
 
         if not legal_moves:
-            return [], np.array([])
+            return [], np.array([]), 0.0
 
         # Expand root
         root.expand(policy, legal_moves)
@@ -90,7 +90,8 @@ class MCTS:
             # BACKPROPAGATE
             self._backpropagate(search_path, value)
 
-        return root.get_policy()
+        move_indices, probs = root.get_policy()
+        return move_indices, probs, root.value
 
     def _backpropagate(self, search_path: list, value: float):
         """Backpropagate the value through the search path.
@@ -107,7 +108,7 @@ class MCTS:
 
     def get_action(
         self, game: ChessGame, temperature: float = 1.0, add_noise: bool = False
-    ) -> Tuple[int, np.ndarray]:
+    ) -> Tuple[int, np.ndarray, float]:
         """Get the best action after running MCTS.
 
         Args:
@@ -118,10 +119,10 @@ class MCTS:
         Returns:
             Tuple of (selected_move_index, full_policy_array).
         """
-        move_indices, probs = self.search(game, add_noise=add_noise)
+        move_indices, probs, root_value = self.search(game, add_noise=add_noise)
 
         if not move_indices:
-            return -1, np.zeros(self.network.policy_size)
+            return -1, np.zeros(self.network.policy_size), 0.0
 
         # Create full policy array
         full_policy = np.zeros(self.network.policy_size, dtype=np.float32)
@@ -137,4 +138,4 @@ class MCTS:
             adjusted_probs /= adjusted_probs.sum()
             action = np.random.choice(move_indices, p=adjusted_probs)
 
-        return action, full_policy
+        return action, full_policy, root_value

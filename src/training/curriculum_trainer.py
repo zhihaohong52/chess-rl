@@ -10,7 +10,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import Config
 from src.game.chess_game import ChessGame
-from src.game.board_encoder import BoardEncoder
 from src.game.move_encoder import get_move_encoder
 from src.model.network import ChessNetwork
 from src.mcts.mcts import MCTS
@@ -54,12 +53,20 @@ class CurriculumTrainer:
         self.max_depth = max_depth
         self.promotion_threshold = promotion_threshold
         self.num_simulations = num_simulations
+        self.teacher_policy_weight = self.config.curriculum_policy_weight
+        self.teacher_value_weight = self.config.curriculum_value_weight
+        self.teacher_multipv = self.config.curriculum_multipv
+        self.teacher_policy_temperature = self.config.curriculum_policy_temperature
 
         # Initialize Stockfish
         self.stockfish = StockfishEvaluator(
             stockfish_path=stockfish_path,
             depth=initial_depth,
-            time_limit=0.05  # Fast for low depths
+            time_limit=0.05,  # Fast for low depths
+            multipv=self.teacher_multipv,
+            limit_strength=self.config.curriculum_limit_strength,
+            elo=self.config.curriculum_elo,
+            skill_level=self.config.curriculum_skill_level,
         )
 
         # Stats tracking
@@ -70,7 +77,7 @@ class CurriculumTrainer:
         # Replay buffer for training
         self.replay_buffer = ReplayBuffer(
             max_size=self.config.buffer_size,
-            state_size=self.config.input_size,
+            state_shape=self.config.input_shape,
             policy_size=self.move_encoder.policy_size
         )
 
@@ -90,7 +97,7 @@ class CurriculumTrainer:
         game = ChessGame()
         mcts = MCTS(self.network, self.config, self.num_simulations)
 
-        examples = []  # (state, policy, player_was_bot)
+        examples = []  # (state, policy, teacher_value)
 
         while not game.is_terminal() and game.move_count < self.config.max_moves:
             is_bot_turn = (game.turn == chess.WHITE) == bot_color
@@ -98,13 +105,49 @@ class CurriculumTrainer:
             if is_bot_turn:
                 # Bot's turn - use MCTS
                 state = game.get_state()
-                action, policy = mcts.get_action(game, temperature=0.5, add_noise=True)
+                add_noise = game.move_count < self.config.dirichlet_moves
+                action, policy, _ = mcts.get_action(game, temperature=0.5, add_noise=add_noise)
+
+                # Teacher policy + value from Stockfish
+                move_probs, teacher_value = self.stockfish.get_policy_and_value(
+                    game.board,
+                    multipv=self.teacher_multipv,
+                    policy_temperature=self.teacher_policy_temperature,
+                )
+
+                teacher_policy = np.zeros(self.move_encoder.policy_size, dtype=np.float32)
+                for move, prob in move_probs:
+                    try:
+                        move_idx = self.move_encoder.encode(move)
+                        teacher_policy[move_idx] = prob
+                    except KeyError:
+                        continue
+
+                if teacher_policy.sum() > 0:
+                    teacher_policy /= teacher_policy.sum()
+                    policy = (
+                        (1.0 - self.teacher_policy_weight) * policy
+                        + self.teacher_policy_weight * teacher_policy
+                    )
+
+                if policy.sum() > 0:
+                    policy /= policy.sum()
+                else:
+                    legal_moves = game.get_legal_move_indices()
+                    if legal_moves:
+                        policy = np.zeros(self.move_encoder.policy_size, dtype=np.float32)
+                        policy[legal_moves] = 1.0 / len(legal_moves)
 
                 if action < 0:
-                    break
+                    if move_probs:
+                        game.apply_move(move_probs[0][0])
+                        examples.append((state, teacher_policy, teacher_value))
+                    else:
+                        break
+                else:
+                    examples.append((state, policy, teacher_value))
+                    game.apply_move_index(action)
 
-                examples.append((state, policy, True))
-                game.apply_move_index(action)
             else:
                 # Stockfish's turn
                 sf_move = self.stockfish.get_best_move(game.board)
@@ -124,8 +167,11 @@ class CurriculumTrainer:
 
         # Convert examples with final outcome
         training_examples = []
-        for state, policy, was_bot in examples:
-            value = bot_outcome  # All examples from bot's perspective
+        for state, policy, teacher_value in examples:
+            value = (
+                self.teacher_value_weight * teacher_value
+                + (1.0 - self.teacher_value_weight) * bot_outcome
+            )
             training_examples.append((state, policy, value))
 
         return training_examples, bot_outcome
@@ -205,7 +251,7 @@ class CurriculumTrainer:
     def train_iteration(
         self,
         num_games: int = 20,
-        training_steps: int = 100,
+        training_steps: Optional[int] = None,
         batch_size: int = 256,
         show_progress: bool = True,
     ) -> dict:
@@ -220,6 +266,8 @@ class CurriculumTrainer:
         Returns:
             Dictionary with iteration statistics.
         """
+        training_steps = training_steps or self.config.curriculum_training_steps
+
         # Play games
         examples, game_stats = self.run_games(num_games, show_progress)
 
@@ -239,7 +287,11 @@ class CurriculumTrainer:
                 iterator = tqdm(iterator, desc="Training")
 
             for _ in iterator:
-                states, policies, values = self.replay_buffer.sample(batch_size)
+                states, policies, values = self.replay_buffer.sample(
+                    batch_size,
+                    augment=True,
+                    move_encoder=self.move_encoder,
+                )
                 loss = self.network.train_on_batch(states, policies, values)
                 losses.append(loss)
 
@@ -266,8 +318,8 @@ class CurriculumTrainer:
     def train(
         self,
         num_iterations: int = 50,
-        games_per_iteration: int = 20,
-        training_steps: int = 100,
+        games_per_iteration: Optional[int] = None,
+        training_steps: Optional[int] = None,
         batch_size: int = 256,
         show_progress: bool = True,
         checkpoint_dir: Optional[str] = None,
@@ -291,6 +343,8 @@ class CurriculumTrainer:
 
         if checkpoint_dir:
             os.makedirs(checkpoint_dir, exist_ok=True)
+
+        games_per_iteration = games_per_iteration or self.config.curriculum_games_per_iteration
 
         for iteration in range(1, num_iterations + 1):
             if show_progress:

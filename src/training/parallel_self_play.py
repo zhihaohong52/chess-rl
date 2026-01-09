@@ -21,21 +21,28 @@ class ParallelMCTS:
         self.num_simulations = num_simulations
         self.c_puct = config.c_puct
 
-    def search_batch(self, games: List[ChessGame], add_noise: bool = True) -> List[Tuple[int, np.ndarray]]:
+    def search_batch(
+        self,
+        games: List[ChessGame],
+        add_noise: bool = True,
+        noise_mask: Optional[List[bool]] = None,
+    ) -> List[Tuple[int, np.ndarray, float]]:
         """Run MCTS for multiple games with batched neural network calls.
 
         Args:
             games: List of games to search.
-            add_noise: Whether to add Dirichlet noise.
+            add_noise: Whether to add Dirichlet noise (fallback if no mask).
+            noise_mask: Optional per-game noise mask.
 
         Returns:
-            List of (action, policy) tuples for each game.
+            List of (action, policy, root_value) tuples for each game.
         """
         num_games = len(games)
+        if noise_mask is None:
+            noise_mask = [add_noise] * num_games
 
         # Initialize roots for each game
         roots = [Node(prior=0) for _ in range(num_games)]
-        game_clones = [g.clone() for g in games]
 
         # Initial expansion - batch evaluate all root positions
         states = np.array([g.get_state() for g in games], dtype=np.float32)
@@ -45,7 +52,7 @@ class ParallelMCTS:
             legal_moves = game.get_legal_move_indices()
             if legal_moves:
                 root.expand(policy, legal_moves)
-                if add_noise:
+                if noise_mask[i]:
                     root.add_dirichlet_noise(
                         self.config.dirichlet_alpha,
                         self.config.dirichlet_epsilon
@@ -84,7 +91,7 @@ class ParallelMCTS:
                 if scratch_game.is_terminal():
                     leaf_terminal.append(True)
                     leaf_values.append(scratch_game.get_outcome_for_current_player())
-                    leaf_states.append(np.zeros(Config.input_size, dtype=np.float32))  # Placeholder
+                    leaf_states.append(np.zeros(self.config.input_shape, dtype=np.float32))  # Placeholder
                 else:
                     leaf_terminal.append(False)
                     leaf_values.append(0)
@@ -205,13 +212,14 @@ class ParallelSelfPlay:
                 break
 
             # Run batched MCTS for all active games
-            results = self.mcts.search_batch(active_games, add_noise=True)
+            noise_mask = [g.move_count < self.config.dirichlet_moves for g in active_games]
+            results = self.mcts.search_batch(active_games, noise_mask=noise_mask)
 
             # Process results and advance games
             games_to_remove = []
             resigned_outcomes = {}  # Track resigned games and their outcomes
 
-            for i, (game, history, (action, policy, value)) in enumerate(zip(active_games, game_histories, results)):
+            for i, (game, history, (action, policy, root_value)) in enumerate(zip(active_games, game_histories, results)):
                 if action < 0 or game.is_terminal():
                     games_to_remove.append(i)
                     continue
@@ -219,7 +227,7 @@ class ParallelSelfPlay:
                 # Store training example
                 state = game.get_state()
                 current_player = game.turn
-                history.append((state, policy, current_player))
+                history.append((state, policy, current_player, root_value))
 
                 # Apply move
                 game.apply_move_index(action)
@@ -229,7 +237,7 @@ class ParallelSelfPlay:
                     games_to_remove.append(i)
                 # Check resign threshold (only after some moves to avoid early resignations)
                 elif (game.move_count >= self.config.resign_check_moves and
-                      value < self.config.resign_threshold):
+                      root_value < self.config.resign_threshold):
                     games_to_remove.append(i)
                     # The current player (after move) is losing, so the side that just moved wins
                     # value is from perspective of player who just moved, and it's very negative
@@ -248,8 +256,12 @@ class ParallelSelfPlay:
                     outcome = game.get_outcome()
 
                 # Create training examples
-                for state, policy, player_was_white in history:
-                    value = outcome if player_was_white else -outcome
+                for state, policy, player_was_white, root_value in history:
+                    outcome_value = outcome if player_was_white else -outcome
+                    value = (
+                        (1.0 - self.config.value_target_mix) * outcome_value
+                        + self.config.value_target_mix * root_value
+                    )
                     all_examples.append((state, policy, value))
 
                 # Remove completed game

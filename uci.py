@@ -181,7 +181,7 @@ class UCIEngine:
             return
 
         # Get best move
-        action, policy = mcts.get_action(self.game, temperature=0.1, add_noise=False)
+        action, policy, _ = mcts.get_action(self.game, temperature=0.1, add_noise=False)
 
         if action < 0:
             self._send("bestmove 0000")

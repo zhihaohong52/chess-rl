@@ -154,8 +154,14 @@ Examples:
     parser.add_argument(
         "--p2-games",
         type=int,
-        default=20,
-        help="Phase 2: Games per iteration (default: 20)",
+        default=40,
+        help="Phase 2: Games per iteration (default: 40)",
+    )
+    parser.add_argument(
+        "--p2-training-steps",
+        type=int,
+        default=200,
+        help="Phase 2: Training steps per iteration (default: 200)",
     )
     parser.add_argument(
         "--p2-max-depth",
@@ -166,8 +172,32 @@ Examples:
     parser.add_argument(
         "--p2-simulations",
         type=int,
-        default=100,
-        help="Phase 2: MCTS simulations per move (default: 100)",
+        default=150,
+        help="Phase 2: MCTS simulations per move (default: 150)",
+    )
+    parser.add_argument(
+        "--p2-elo",
+        type=int,
+        default=None,
+        help="Phase 2: Limit Stockfish strength with UCI_Elo (overrides config)",
+    )
+    parser.add_argument(
+        "--p2-skill-level",
+        type=int,
+        default=None,
+        help="Phase 2: Stockfish Skill Level (overrides config)",
+    )
+    parser.add_argument(
+        "--p2-policy-weight",
+        type=float,
+        default=None,
+        help="Phase 2: Blend weight for Stockfish policy targets (0-1)",
+    )
+    parser.add_argument(
+        "--p2-value-weight",
+        type=float,
+        default=None,
+        help="Phase 2: Blend weight for Stockfish value targets (0-1)",
     )
 
     # Phase 3: Self-Play
@@ -208,6 +238,7 @@ Examples:
         args.p1_batches = 10
         args.p2_iterations = 3
         args.p2_games = 5
+        args.p2_training_steps = 20
         args.p3_iterations = 3
         args.p3_games = 8
 
@@ -244,6 +275,18 @@ Examples:
         stockfish_path=stockfish_path,
     )
 
+    # Phase 2 overrides
+    if args.p2_elo is not None or args.p2_skill_level is not None:
+        config.curriculum_limit_strength = True
+    if args.p2_elo is not None:
+        config.curriculum_elo = args.p2_elo
+    if args.p2_skill_level is not None:
+        config.curriculum_skill_level = args.p2_skill_level
+    if args.p2_policy_weight is not None:
+        config.curriculum_policy_weight = args.p2_policy_weight
+    if args.p2_value_weight is not None:
+        config.curriculum_value_weight = args.p2_value_weight
+
     # Resume from checkpoint if specified
     if args.resume:
         checkpoint_path = os.path.join(args.checkpoint_dir, args.resume)
@@ -272,6 +315,7 @@ Examples:
         results["phase2"] = pipeline.phase2_curriculum(
             num_iterations=args.p2_iterations,
             games_per_iteration=args.p2_games,
+            training_steps=args.p2_training_steps,
             max_depth=args.p2_max_depth,
             num_simulations=args.p2_simulations,
         )

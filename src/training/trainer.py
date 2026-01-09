@@ -12,6 +12,7 @@ from src.model.network import ChessNetwork
 from src.training.self_play import SelfPlay
 from src.training.parallel_self_play import ParallelSelfPlay
 from src.training.replay_buffer import ReplayBuffer
+from src.game.move_encoder import get_move_encoder
 
 
 class Trainer:
@@ -35,9 +36,10 @@ class Trainer:
         # Initialize components
         self.network = ChessNetwork(self.config)
         self.network.compile()
+        self.move_encoder = get_move_encoder()
         self.replay_buffer = ReplayBuffer(
             max_size=self.config.buffer_size,
-            state_size=self.config.input_size,
+            state_shape=self.config.input_shape,
             policy_size=self.network.policy_size
         )
 
@@ -148,7 +150,11 @@ class Trainer:
             iterator = tqdm(iterator, desc="Training")
 
         for _ in iterator:
-            states, policies, values = self.replay_buffer.sample(self.config.batch_size)
+            states, policies, values = self.replay_buffer.sample(
+                self.config.batch_size,
+                augment=True,
+                move_encoder=self.move_encoder,
+            )
             loss = self.network.train_on_batch(states, policies, values)
             losses.append(loss)
 

@@ -101,8 +101,8 @@ class FullTrainingPipeline:
     def phase2_curriculum(
         self,
         num_iterations: int = 50,
-        games_per_iteration: int = 20,
-        training_steps: int = 100,
+        games_per_iteration: Optional[int] = None,
+        training_steps: Optional[int] = None,
         initial_depth: int = 1,
         max_depth: int = 6,
         promotion_threshold: float = 0.55,
@@ -138,7 +138,7 @@ class FullTrainingPipeline:
         ) as trainer:
             history = trainer.train(
                 num_iterations=num_iterations,
-                games_per_iteration=games_per_iteration,
+                games_per_iteration=games_per_iteration or self.config.curriculum_games_per_iteration,
                 training_steps=training_steps,
                 show_progress=True,
                 checkpoint_dir=self.checkpoint_dir,
@@ -211,7 +211,7 @@ class FullTrainingPipeline:
         supervised_batches: int = 100,
         # Phase 2 params
         curriculum_iterations: int = 50,
-        curriculum_games: int = 20,
+        curriculum_games: Optional[int] = None,
         curriculum_max_depth: int = 6,
         # Phase 3 params
         selfplay_iterations: int = 50,
