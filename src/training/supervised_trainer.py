@@ -1,12 +1,15 @@
 """Supervised learning from Stockfish moves and evaluations."""
 
-import numpy as np
-from typing import Optional, List, Tuple
 import json
-from tqdm import tqdm
-import chess
 import os
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Optional, List, Tuple
+
+import chess
+import numpy as np
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import Config
@@ -15,6 +18,126 @@ from src.game.move_encoder import get_move_encoder
 from src.model.network import ChessNetwork
 from src.training.stockfish_evaluator import StockfishEvaluator
 from src.training.replay_buffer import mirror_state, mirror_policy
+
+
+def _generate_random_position(max_moves: int) -> Tuple[chess.Board, List[chess.Board]]:
+    """Generate a random legal chess position by playing random moves."""
+    board = chess.Board()
+    history = [board.copy()]
+    num_moves = np.random.randint(1, max_moves + 1)
+
+    for _ in range(num_moves):
+        if board.is_game_over():
+            break
+        moves = list(board.legal_moves)
+        if not moves:
+            break
+        move = np.random.choice(moves)
+        board.push(move)
+        history.append(board.copy())
+
+    return board, history[-Config.history_length:]
+
+
+def _generate_stockfish_position(
+    stockfish: StockfishEvaluator,
+    multipv: int,
+    position_temperature: float,
+    max_moves: int,
+) -> Tuple[chess.Board, List[chess.Board]]:
+    """Generate a position by playing Stockfish moves with sampling."""
+    board = chess.Board()
+    history = [board.copy()]
+    num_moves = np.random.randint(1, max_moves + 1)
+
+    for _ in range(num_moves):
+        if board.is_game_over():
+            break
+        move_probs, _ = stockfish.get_policy_and_value(
+            board,
+            multipv=multipv,
+            policy_temperature=position_temperature,
+        )
+        move = SupervisedTrainer._sample_move_static(move_probs)
+        if move is None:
+            break
+        board.push(move)
+        history.append(board.copy())
+
+    return board, history[-Config.history_length:]
+
+
+def _generate_supervised_batch_worker(
+    batch_size: int,
+    stockfish_path: Optional[str],
+    stockfish_depth: int,
+    multipv: int,
+    policy_temperature: float,
+    position_source: str,
+    position_max_moves: int,
+    position_temperature: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Worker to generate supervised samples with a private Stockfish evaluator."""
+    move_encoder = get_move_encoder()
+    stockfish = StockfishEvaluator(
+        stockfish_path=stockfish_path,
+        depth=stockfish_depth,
+        time_limit=0.1,
+        multipv=multipv,
+    )
+    try:
+        states = []
+        policies = []
+        values = []
+
+        for _ in range(batch_size):
+            if position_source == "stockfish":
+                board, history = _generate_stockfish_position(
+                    stockfish,
+                    multipv,
+                    position_temperature,
+                    position_max_moves,
+                )
+            else:
+                board, history = _generate_random_position(position_max_moves)
+
+            if board.is_game_over():
+                continue
+
+            move_probs, evaluation = stockfish.get_policy_and_value(
+                board,
+                multipv=multipv,
+                policy_temperature=policy_temperature,
+            )
+
+            if not move_probs:
+                continue
+
+            state = BoardEncoder.encode(board, history=history)
+
+            policy = np.zeros(move_encoder.policy_size, dtype=np.float32)
+            for move, prob in move_probs:
+                try:
+                    move_idx = move_encoder.encode(move)
+                    policy[move_idx] = prob
+                except KeyError:
+                    continue
+
+            if policy.sum() <= 0:
+                continue
+            policy /= policy.sum()
+
+            states.append(state)
+            policies.append(policy)
+            values.append(evaluation)
+
+        return (
+            np.array(states, dtype=np.float32),
+            np.array(policies, dtype=np.float32),
+            np.array(values, dtype=np.float32),
+        )
+    finally:
+        stockfish.close()
 
 
 class SupervisedTrainer:
@@ -59,10 +182,18 @@ class SupervisedTrainer:
         self.cache_size = self.config.supervised_cache_size
         self.cache_dtype = self.config.supervised_cache_dtype
         self.cache_rebuild = self.config.supervised_cache_rebuild
+        self.cache_workers = getattr(self.config, "supervised_cache_workers", 1)
+        self.cache_batch_size = getattr(self.config, "supervised_cache_batch_size", 512)
         self.cache_states = None
         self.cache_policies = None
         self.cache_values = None
         self.cache_count = 0
+        self.cache_build_seconds = None
+        self.cache_build_throughput = None
+        self.cache_build_workers = None
+        self.cache_build_batch_size = None
+        self.stockfish_path = stockfish_path
+        self.stockfish_depth = stockfish_depth
 
         # Initialize Stockfish
         self.stockfish = StockfishEvaluator(
@@ -155,10 +286,24 @@ class SupervisedTrainer:
             shape=(self.cache_size,),
         )
 
+        if self.cache_workers and self.cache_workers > 1:
+            self._build_cache_parallel(states_mm, policies_mm, values_mm, dtype)
+            meta = self._cache_meta()
+            meta["cache_size"] = int(self.cache_size)
+            with open(meta_path, "w", encoding="utf-8") as handle:
+                json.dump(meta, handle, indent=2)
+
+            self.cache_states = np.load(states_path, mmap_mode="r")
+            self.cache_policies = np.load(policies_path, mmap_mode="r")
+            self.cache_values = np.load(values_path, mmap_mode="r")
+            self.cache_count = self.cache_size
+            return
+
+        start_time = time.time()
         filled = 0
         pbar = tqdm(total=self.cache_size, desc="Building supervised cache", leave=True)
         while filled < self.cache_size:
-            batch = min(512, self.cache_size - filled)
+            batch = min(max(1, int(self.cache_batch_size)), self.cache_size - filled)
             states, policies, values = self.generate_training_batch(
                 batch,
                 max_position_moves=self.position_max_moves,
@@ -189,6 +334,64 @@ class SupervisedTrainer:
         self.cache_policies = np.load(policies_path, mmap_mode="r")
         self.cache_values = np.load(values_path, mmap_mode="r")
         self.cache_count = self.cache_size
+        elapsed = max(0.001, time.time() - start_time)
+        self.cache_build_seconds = elapsed
+        self.cache_build_throughput = self.cache_size / elapsed
+        self.cache_build_workers = 1
+        self.cache_build_batch_size = self.cache_batch_size
+
+    def _build_cache_parallel(self, states_mm, policies_mm, values_mm, dtype):
+        """Build cache using multiprocessing workers."""
+        start_time = time.time()
+        filled = 0
+        pbar = tqdm(total=self.cache_size, desc="Building supervised cache", leave=True)
+        worker_count = max(1, int(self.cache_workers))
+        batch_size = max(1, int(self.cache_batch_size))
+
+        worker_args = (
+            batch_size,
+            self.stockfish_path,
+            int(self.stockfish_depth),
+            int(self.multipv),
+            float(self.policy_temperature),
+            self.position_source,
+            int(self.position_max_moves),
+            float(self.position_temperature),
+        )
+
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            pending = {
+                executor.submit(_generate_supervised_batch_worker, *worker_args): worker_args
+                for _ in range(worker_count)
+            }
+            while pending and filled < self.cache_size:
+                for future in as_completed(list(pending)):
+                    pending.pop(future, None)
+                    states, policies, values = future.result()
+                    if len(states) > 0:
+                        take = min(len(states), self.cache_size - filled)
+                        states_mm[filled:filled + take] = states[:take].astype(dtype, copy=False)
+                        policies_mm[filled:filled + take] = policies[:take].astype(dtype, copy=False)
+                        values_mm[filled:filled + take] = values[:take].astype(dtype, copy=False)
+                        filled += take
+                        pbar.update(take)
+                    if filled < self.cache_size:
+                        pending[executor.submit(_generate_supervised_batch_worker, *worker_args)] = worker_args
+                    if filled >= self.cache_size:
+                        for pending_future in pending:
+                            pending_future.cancel()
+                        pending.clear()
+                        break
+
+        pbar.close()
+        states_mm.flush()
+        policies_mm.flush()
+        values_mm.flush()
+        elapsed = max(0.001, time.time() - start_time)
+        self.cache_build_seconds = elapsed
+        self.cache_build_throughput = self.cache_size / elapsed
+        self.cache_build_workers = worker_count
+        self.cache_build_batch_size = batch_size
 
     def _ensure_cache(self):
         """Load cache or build it if missing/mismatched."""
@@ -218,7 +421,8 @@ class SupervisedTrainer:
 
         return states, policies, values
 
-    def _sample_move(self, move_probs: List[Tuple[chess.Move, float]]) -> Optional[chess.Move]:
+    @staticmethod
+    def _sample_move_static(move_probs: List[Tuple[chess.Move, float]]) -> Optional[chess.Move]:
         """Sample a move from a list of (move, prob)."""
         if not move_probs:
             return None
@@ -227,6 +431,9 @@ class SupervisedTrainer:
         probs = probs / probs.sum()
         idx = np.random.choice(len(moves), p=probs)
         return moves[idx]
+
+    def _sample_move(self, move_probs: List[Tuple[chess.Move, float]]) -> Optional[chess.Move]:
+        return self._sample_move_static(move_probs)
 
     def generate_random_position(self, max_moves: int = 40) -> Tuple[chess.Board, List[chess.Board]]:
         """Generate a random legal chess position by playing random moves.
@@ -237,43 +444,16 @@ class SupervisedTrainer:
         Returns:
             Tuple of (board, history) with history containing recent boards.
         """
-        board = chess.Board()
-        history = [board.copy()]
-        num_moves = np.random.randint(1, max_moves + 1)
-
-        for _ in range(num_moves):
-            if board.is_game_over():
-                break
-            moves = list(board.legal_moves)
-            if not moves:
-                break
-            move = np.random.choice(moves)
-            board.push(move)
-            history.append(board.copy())
-
-        return board, history[-self.config.history_length:]
+        return _generate_random_position(max_moves)
 
     def generate_stockfish_position(self, max_moves: int = 40) -> Tuple[chess.Board, List[chess.Board]]:
         """Generate a position by playing Stockfish moves with sampling."""
-        board = chess.Board()
-        history = [board.copy()]
-        num_moves = np.random.randint(1, max_moves + 1)
-
-        for _ in range(num_moves):
-            if board.is_game_over():
-                break
-            move_probs, _ = self.stockfish.get_policy_and_value(
-                board,
-                multipv=self.multipv,
-                policy_temperature=self.position_temperature,
-            )
-            move = self._sample_move(move_probs)
-            if move is None:
-                break
-            board.push(move)
-            history.append(board.copy())
-
-        return board, history[-self.config.history_length:]
+        return _generate_stockfish_position(
+            self.stockfish,
+            self.multipv,
+            self.position_temperature,
+            max_moves,
+        )
 
     def generate_training_batch(
         self,
