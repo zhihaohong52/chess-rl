@@ -18,8 +18,9 @@ class Config:
 
     # Self-play parameters
     games_per_iteration = 100
-    temperature = 1.0  # Move selection temperature
-    temp_threshold = 15  # Moves before temperature drops to near-zero
+    temperature = 1.0  # Move selection temperature (early game)
+    temp_threshold = 15  # Moves before temperature drops
+    late_temperature = 0.1  # Temperature after threshold (near-greedy)
     max_moves = 512  # Maximum moves per game
     resign_threshold = -0.9  # Resign if value drops below this (speeds up self-play)
     resign_check_moves = 10  # Only check resign after this many moves

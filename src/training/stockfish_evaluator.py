@@ -55,7 +55,7 @@ class StockfishEvaluator:
                 found = shutil.which(path)
                 if found:
                     return found
-            except:
+            except (OSError, IOError):
                 pass
 
         return None
@@ -170,7 +170,7 @@ class StockfishEvaluator:
         """Close the Stockfish engine."""
         try:
             self.engine.quit()
-        except:
+        except (chess.engine.EngineTerminatedError, OSError, AttributeError):
             pass
 
     def __del__(self):
