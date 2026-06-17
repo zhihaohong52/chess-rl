@@ -18,9 +18,10 @@ import chess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
-from src.model.network import ChessNetwork
+from src.model.transformer import ChessTransformer
+from src.model.evaluator import TransformerEvaluator
 from src.game.chess_game import ChessGame
-from src.mcts.mcts import MCTS
+from src.mcts.batched_mcts import BatchedMCTS
 
 
 class UCIEngine:
@@ -40,22 +41,25 @@ class UCIEngine:
         self.num_simulations = num_simulations
         self.debug = False
 
-        # Initialize network
-        self.network = ChessNetwork(self.config)
-        self.network.compile()
+        self.net = ChessTransformer(self.config)
+        # Build once so weights can load.
+        import chess as _chess
+        from src.game.token_encoder import encode_batch as _eb
+        import tensorflow as _tf
+        _sq, _sf = _eb([_chess.Board()], [0])
+        self.net(_tf.constant(_sq), _tf.constant(_sf))
+        if model_path:
+            wpath = model_path if model_path.endswith(".weights.h5") else model_path + ".weights.h5"
+            if os.path.exists(wpath):
+                try:
+                    self.net.load_weights(wpath)
+                    self._debug(f"Loaded model from {wpath}")
+                except Exception as e:
+                    self._debug(f"Failed to load model: {e}")
 
-        # Load model if provided
-        weights_path = model_path + ".weights.h5" if model_path and not model_path.endswith(".weights.h5") else model_path
-        if model_path and os.path.exists(weights_path):
-            try:
-                self.network.load(model_path)
-                self._debug(f"Loaded model from {model_path}")
-            except Exception as e:
-                self._debug(f"Failed to load model: {e}")
-
-        # Game state
+        self.evaluator = TransformerEvaluator(self.net, use_fp16=True)
         self.game = ChessGame()
-        self.mcts = MCTS(self.network, self.config, self.num_simulations)
+        self.mcts = BatchedMCTS(self.evaluator, self.config, self.num_simulations)
 
     def _debug(self, message: str):
         """Print debug message if debug mode is enabled."""
@@ -95,7 +99,7 @@ class UCIEngine:
         if name_lower == "simulations":
             try:
                 self.num_simulations = int(value)
-                self.mcts = MCTS(self.network, self.config, self.num_simulations)
+                self.mcts.num_simulations = self.num_simulations
                 self._debug(f"Simulations set to {self.num_simulations}")
             except ValueError:
                 pass
@@ -133,8 +137,17 @@ class UCIEngine:
                     move = chess.Move.from_uci(move_uci)
                     if move in self.game.board.legal_moves:
                         self.game.apply_move(move)
+                        self.mcts.advance(move)
                 except ValueError:
                     self._debug(f"Invalid move: {move_uci}")
+
+    def get_best_move_uci(self) -> str:
+        if self.game.is_terminal():
+            return "0000"
+        move = self.mcts.choose_move(self.game.board, temperature=0.0)
+        if move is None:
+            return "0000"
+        return move.uci()
 
     def go(self, args: list):
         """Handle 'go' command - start calculating.
@@ -142,64 +155,25 @@ class UCIEngine:
         Args:
             args: Go parameters (wtime, btime, winc, binc, movetime, etc.)
         """
-        # Parse time controls (simplified - just use fixed simulations for now)
-        movetime = None
-        depth = None
-
+        sims = self.num_simulations
         i = 0
         while i < len(args):
             if args[i] == "movetime" and i + 1 < len(args):
                 try:
-                    movetime = int(args[i + 1])
+                    sims = max(10, min(int(args[i + 1]) // 2, self.num_simulations))
                 except ValueError:
                     pass
                 i += 2
             elif args[i] == "depth" and i + 1 < len(args):
                 try:
-                    depth = int(args[i + 1])
+                    sims = max(10, int(args[i + 1]) * 50)
                 except ValueError:
                     pass
                 i += 2
             else:
                 i += 1
-
-        # Adjust simulations based on time (rough heuristic)
-        sims = self.num_simulations
-        if movetime:
-            # Scale simulations with time (assume ~1ms per simulation)
-            sims = max(10, min(movetime // 2, self.num_simulations))
-        if depth:
-            # Use depth as a proxy for simulations
-            sims = max(10, depth * 50)
-
-        # Create MCTS with adjusted simulations
-        mcts = MCTS(self.network, self.config, sims)
-
-        # Check if game is already over
-        if self.game.is_terminal():
-            self._send("bestmove 0000")
-            return
-
-        # Get best move
-        action, policy, _ = mcts.get_action(self.game, temperature=0.1, add_noise=False)
-
-        if action < 0:
-            self._send("bestmove 0000")
-            return
-
-        # Decode move
-        move = self.game.move_encoder.decode(action)
-
-        # Handle queen promotion
-        piece = self.game.board.piece_at(move.from_square)
-        if piece and piece.piece_type == chess.PAWN:
-            to_rank = chess.square_rank(move.to_square)
-            if to_rank == 0 or to_rank == 7:
-                if move.promotion is None:
-                    move = chess.Move(move.from_square, move.to_square, chess.QUEEN)
-
-        # Send best move
-        self._send(f"bestmove {move.uci()}")
+        self.mcts.num_simulations = sims
+        self._send(f"bestmove {self.get_best_move_uci()}")
 
     def quit(self):
         """Handle 'quit' command."""

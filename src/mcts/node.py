@@ -146,3 +146,18 @@ class Node:
             self.children[move_idx].prior = (
                 (1 - epsilon) * self.children[move_idx].prior + epsilon * noise[i]
             )
+
+    def expand_moves(self, move_priors: dict):
+        """Expand with children keyed directly by chess.Move (priors should sum to ~1)."""
+        for move, prior in move_priors.items():
+            self.children[move] = Node(prior=float(prior))
+
+    def add_virtual_loss(self, amount: int = 1):
+        """Temporarily make this node look worse to the parent selector."""
+        self.visit_count += amount
+        self.value_sum += amount  # raises child.value -> lowers q=-child.value
+
+    def remove_virtual_loss(self, amount: int = 1):
+        """Undo add_virtual_loss exactly."""
+        self.visit_count -= amount
+        self.value_sum -= amount
