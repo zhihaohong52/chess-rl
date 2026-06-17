@@ -19,3 +19,23 @@ def test_black_to_move_pieces_become_side_to_move_ids():
     toks = encode_square_tokens(canonical_board(b))
     # Black's own pieces (now side-to-move) must use ids 1..6 somewhere
     assert toks.max() >= 6 and (toks[(toks >= 1) & (toks <= 6)].size > 0)
+
+
+from src.game.token_encoder import encode_state_features, encode_position, encode_batch, STATE_DIM
+
+
+def test_state_features_fifty_move_and_repetition():
+    # halfmove clock 40 set via FEN field 5; canonical frame preserves it
+    b = chess.Board("8/8/8/4k3/8/8/4K3/8 w - - 40 80")
+    f = encode_state_features(canonical_board(b), repetition_count=2)
+    assert f.shape == (STATE_DIM,) and f.dtype == np.float32
+    assert abs(f[13] - 0.40) < 1e-6   # halfmove_clock / 100
+    assert abs(f[14] - (2 / 3.0)) < 1e-6  # repetition count / 3
+    assert f[16] == 1.0  # constant bias
+
+
+def test_encode_position_and_batch_shapes():
+    st, sf = encode_position(chess.Board())
+    assert st.shape == (64,) and sf.shape == (STATE_DIM,)
+    sts, sfs = encode_batch([chess.Board(), chess.Board()], [0, 0])
+    assert sts.shape == (2, 64) and sfs.shape == (2, STATE_DIM)
