@@ -13,6 +13,7 @@ import sys
 import os
 import argparse
 import chess
+import torch
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,7 +35,7 @@ class UCIEngine:
         """Initialize the UCI engine.
 
         Args:
-            model_path: Path to model weights. If None, uses random initialization.
+            model_path: Path to model weights (.pt). If None, uses random initialization.
             num_simulations: Number of MCTS simulations per move.
         """
         self.config = Config()
@@ -42,22 +43,18 @@ class UCIEngine:
         self.debug = False
 
         self.net = ChessTransformer(self.config)
-        # Build once so weights can load.
-        import chess as _chess
-        from src.game.token_encoder import encode_batch as _eb
-        import tensorflow as _tf
-        _sq, _sf = _eb([_chess.Board()], [0])
-        self.net(_tf.constant(_sq), _tf.constant(_sf))
+
         if model_path:
-            wpath = model_path if model_path.endswith(".weights.h5") else model_path + ".weights.h5"
+            # Accept path with or without .pt extension
+            wpath = model_path if model_path.endswith(".pt") else model_path + ".pt"
             if os.path.exists(wpath):
                 try:
-                    self.net.load_weights(wpath)
+                    self.net.load_state_dict(torch.load(wpath, map_location="cpu"))
                     self._debug(f"Loaded model from {wpath}")
                 except Exception as e:
                     self._debug(f"Failed to load model: {e}")
 
-        self.evaluator = TransformerEvaluator(self.net, use_fp16=True)
+        self.evaluator = TransformerEvaluator(self.net, use_fp16=False)
         self.game = ChessGame()
         self.mcts = BatchedMCTS(self.evaluator, self.config, self.num_simulations)
 
@@ -233,7 +230,7 @@ def main():
         "--model",
         type=str,
         default="checkpoints/model_final",
-        help="Path to model weights",
+        help="Path to model weights (.pt)",
     )
     parser.add_argument(
         "--simulations",

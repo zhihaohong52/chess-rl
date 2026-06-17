@@ -1,7 +1,8 @@
-"""MCTS-facing evaluator wrapping the ChessTransformer."""
+"""MCTS-facing evaluator wrapping ChessTransformer (PyTorch)."""
 
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn.functional as F
 
 from src.game.token_encoder import encode_batch
 from src.game.orientation import to_canonical_move
@@ -9,8 +10,12 @@ from src.game.move_encoder import get_move_encoder
 
 
 class TransformerEvaluator:
-    def __init__(self, net, use_fp16: bool = False):
-        self.net = net
+    def __init__(self, net, use_fp16: bool = False, device=None):
+        if device is None:
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+        self.device = device
+        self.net = net.to(device)
+        self.net.eval()
         self.me = get_move_encoder()
         self.use_fp16 = use_fp16
 
@@ -21,9 +26,14 @@ class TransformerEvaluator:
         if reps is None:
             reps = [0] * len(boards)
         sq, sf = encode_batch(boards, reps)
-        pol_logits, wdl_logits, _ = self.net.predict_batch(tf.constant(sq), tf.constant(sf))
-        pol_logits = np.asarray(pol_logits)
-        wdl = tf.nn.softmax(wdl_logits, axis=-1).numpy()
+        sq_t = torch.tensor(sq, dtype=torch.long, device=self.device)
+        sf_t = torch.tensor(sf, dtype=torch.float32, device=self.device)
+
+        with torch.no_grad():
+            pol_logits, wdl_logits, _ = self.net.predict_batch(sq_t, sf_t)
+
+        pol_logits = pol_logits.cpu().numpy()
+        wdl = F.softmax(wdl_logits.cpu(), dim=-1).numpy()
 
         out = []
         for i, b in enumerate(boards):

@@ -1,7 +1,7 @@
 import numpy as np
 import chess
 from src.data.labeled_position import LabeledPosition
-from src.data.preencode import encode_example
+from src.data.preencode import encode_example, write_shard
 from src.game.move_encoder import get_move_encoder
 from src.game.orientation import to_canonical_move
 
@@ -32,3 +32,25 @@ def test_encode_example_black_to_move_mirrors_moves():
     me = get_move_encoder()
     expected = me.encode(to_canonical_move(chess.Move.from_uci("e7e5"), chess.BLACK))
     assert ex["legal_indices"].tolist() == [expected]
+
+
+def test_write_shard_produces_npz_with_correct_schema(tmp_path):
+    lps = [
+        LabeledPosition(chess.STARTING_FEN, [("e2e4", 1.0)], (0.5, 0.4, 0.1), 80.0),
+        LabeledPosition(chess.STARTING_FEN, [("d2d4", 0.5), ("c2c4", 0.5)], (0.4, 0.5, 0.1), 79.0),
+    ]
+    path = str(tmp_path / "shard0.npz")
+    n = write_shard(lps, path)
+    assert n == 2
+
+    d = np.load(path)
+    assert d["square_tokens"].shape == (2, 64) and d["square_tokens"].dtype == np.int8
+    assert d["state_features"].shape == (2, 18) and d["state_features"].dtype == np.float32
+    assert d["wdl"].shape == (2, 3) and d["wdl"].dtype == np.float32
+    assert d["moves_left"].shape == (2,) and d["moves_left"].dtype == np.float32
+    # legal_indices and legal_probs are concatenated: lp0 has 1 move, lp1 has 2
+    assert d["legal_indices"].dtype == np.int32
+    assert d["legal_probs"].dtype == np.float32
+    assert d["counts"].shape == (2,) and d["counts"].dtype == np.int32
+    assert d["counts"][0] == 1 and d["counts"][1] == 2
+    assert len(d["legal_indices"]) == 3  # 1 + 2

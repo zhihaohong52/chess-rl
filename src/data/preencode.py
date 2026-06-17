@@ -1,8 +1,7 @@
-"""Pre-encode LabeledPosition -> canonical example dict and TFRecord shards."""
+"""Pre-encode LabeledPosition -> canonical example dict and npz shards."""
 
 import chess
 import numpy as np
-import tensorflow as tf
 
 from src.game.token_encoder import encode_position
 from src.game.orientation import to_canonical_move
@@ -31,35 +30,55 @@ def encode_example(lp) -> dict:
     }
 
 
-def _bytes_feature(b):
-    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[b]))
-
-
-def _float_list(v):
-    return tf.train.Feature(float_list=tf.train.FloatList(value=list(v)))
-
-
-def _int64_list(v):
-    return tf.train.Feature(int64_list=tf.train.Int64List(value=list(v)))
-
-
-def serialize_example(ex: dict) -> bytes:
-    feat = {
-        "square_tokens": _bytes_feature(ex["square_tokens"].tobytes()),
-        "state_features": _float_list(ex["state_features"]),
-        "legal_indices": _int64_list(ex["legal_indices"]),
-        "legal_probs": _float_list(ex["legal_probs"]),
-        "wdl": _float_list(ex["wdl"]),
-        "moves_left": _float_list([float(ex["moves_left"])]),
-    }
-    return tf.train.Example(features=tf.train.Features(feature=feat)).SerializeToString()
-
-
 def write_shard(labeled_positions, path: str) -> int:
-    """Write an iterable of LabeledPosition to a TFRecord shard. Returns count."""
-    n = 0
-    with tf.io.TFRecordWriter(path) as w:
-        for lp in labeled_positions:
-            w.write(serialize_example(encode_example(lp)))
-            n += 1
+    """Encode an iterable of LabeledPosition and save as a compressed npz shard.
+
+    Schema:
+      square_tokens : int8   [N, 64]
+      state_features: float32 [N, 18]
+      wdl           : float32 [N, 3]
+      moves_left    : float32 [N]
+      legal_indices : int32  [total_legal]   — concatenated across all examples
+      legal_probs   : float32 [total_legal]  — parallel to legal_indices
+      counts        : int32  [N]             — number of legal moves per example
+
+    Returns N (number of examples written).
+    """
+    sq_list, sf_list, wdl_list, ml_list = [], [], [], []
+    idx_list, prob_list, counts = [], [], []
+
+    for lp in labeled_positions:
+        ex = encode_example(lp)
+        sq_list.append(ex["square_tokens"])          # (64,) int8
+        sf_list.append(ex["state_features"])         # (18,) float32
+        wdl_list.append(ex["wdl"])                   # (3,) float32
+        ml_list.append(ex["moves_left"])             # scalar float32
+        idx_list.append(ex["legal_indices"].astype(np.int32))
+        prob_list.append(ex["legal_probs"])
+        counts.append(len(ex["legal_indices"]))
+
+    n = len(sq_list)
+    if n == 0:
+        np.savez_compressed(
+            path,
+            square_tokens=np.empty((0, 64), dtype=np.int8),
+            state_features=np.empty((0, 18), dtype=np.float32),
+            wdl=np.empty((0, 3), dtype=np.float32),
+            moves_left=np.empty((0,), dtype=np.float32),
+            legal_indices=np.empty((0,), dtype=np.int32),
+            legal_probs=np.empty((0,), dtype=np.float32),
+            counts=np.empty((0,), dtype=np.int32),
+        )
+        return 0
+
+    np.savez_compressed(
+        path,
+        square_tokens=np.stack(sq_list, axis=0),           # [N, 64] int8
+        state_features=np.stack(sf_list, axis=0),          # [N, 18] float32
+        wdl=np.stack(wdl_list, axis=0),                    # [N, 3] float32
+        moves_left=np.array(ml_list, dtype=np.float32),    # [N] float32
+        legal_indices=np.concatenate(idx_list),            # [total] int32
+        legal_probs=np.concatenate(prob_list),             # [total] float32
+        counts=np.array(counts, dtype=np.int32),           # [N] int32
+    )
     return n

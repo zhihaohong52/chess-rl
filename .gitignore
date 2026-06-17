@@ -28,6 +28,8 @@ logs/
 *.h5
 *.keras
 *.weights.*
+*.pt
+*.npz
 
 # Jupyter
 .ipynb_checkpoints/
@@ -35,3 +37,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+/.serena
+/.rtk
+/.venv

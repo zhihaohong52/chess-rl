@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-encode a source dataset into TFRecord shards.
+"""Pre-encode a source dataset into npz shards.
 
 Usage: python scripts/preencode.py --source kaggle --input data/chessData.csv \
        --out-dir data/shards --shard-size 100000
@@ -37,7 +37,7 @@ def main():
     src = iter_kaggle_csv(args.input) if args.source == "kaggle" else iter_chessbench(args.input)
     total = 0
     for i, chunk in enumerate(_chunked(src, args.shard_size)):
-        path = os.path.join(args.out_dir, f"shard_{i:05d}.tfrecord")
+        path = os.path.join(args.out_dir, f"shard_{i:05d}.npz")
         total += write_shard(chunk, path)
         print(f"wrote {path} ({total} positions)")
     print(f"done: {total} positions")
