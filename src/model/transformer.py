@@ -8,7 +8,7 @@ from src.model.smolgen import Smolgen
 from src.model.heads import PolicyHead, ValueHead, MovesLeftHead
 
 
-class _BiasedMHA(layers.Layer):
+class BiasedMHA(layers.Layer):
     """Multi-head self-attention with an additive per-head bias on the logits."""
 
     def __init__(self, n_heads, d_model, **kwargs):
@@ -37,11 +37,11 @@ class _BiasedMHA(layers.Layer):
         return self.wo(o)
 
 
-class _EncoderLayer(layers.Layer):
+class EncoderLayer(layers.Layer):
     def __init__(self, cfg, shared_smolgen_out, **kwargs):
         super().__init__(**kwargs)
         self.ln1 = layers.LayerNormalization()
-        self.attn = _BiasedMHA(cfg.n_heads, cfg.d_model)
+        self.attn = BiasedMHA(cfg.n_heads, cfg.d_model)
         self.smolgen = Smolgen(cfg.n_heads, cfg.smolgen_compress,
                                cfg.smolgen_hidden, cfg.smolgen_gen, shared_smolgen_out)
         self.ln2 = layers.LayerNormalization()
@@ -74,7 +74,8 @@ class ChessTransformer(keras.Model):
             layers.Dense(d),
         ])
         shared_smolgen_out = layers.Dense(64 * 64, use_bias=False)
-        self.enc = [_EncoderLayer(cfg, shared_smolgen_out) for _ in range(cfg.n_layers)]
+        self.enc = [EncoderLayer(cfg, shared_smolgen_out, name=f"encoder_layer_{i}")
+                    for i in range(cfg.n_layers)]
         self.final_ln = layers.LayerNormalization()
         self.policy_head = PolicyHead()
         self.value_head = ValueHead()

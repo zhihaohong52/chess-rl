@@ -21,7 +21,7 @@ class TransformerEvaluator:
         if reps is None:
             reps = [0] * len(boards)
         sq, sf = encode_batch(boards, reps)
-        pol_logits, wdl_logits, _ = self.net(tf.constant(sq), tf.constant(sf), training=False)
+        pol_logits, wdl_logits, _ = self.net.predict_batch(tf.constant(sq), tf.constant(sf))
         pol_logits = np.asarray(pol_logits)
         wdl = tf.nn.softmax(wdl_logits, axis=-1).numpy()
 
