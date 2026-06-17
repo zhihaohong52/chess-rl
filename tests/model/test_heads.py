@@ -1,6 +1,6 @@
 import chess
 import numpy as np
-import tensorflow as tf
+import torch
 from src.model.heads import build_policy_index_map, PolicyHead, ValueHead, MovesLeftHead
 from src.game.move_encoder import get_move_encoder
 
@@ -16,16 +16,16 @@ def test_policy_index_map_ranges():
 
 def test_policy_head_shape_and_finite():
     P = get_move_encoder().policy_size
-    head = PolicyHead(d_attn=64)
-    sq = tf.random.normal((3, 64, 256))
+    head = PolicyHead(256)
+    sq = torch.randn(3, 64, 256)
     logits = head(sq)
     assert tuple(logits.shape) == (3, P)
-    assert np.isfinite(logits.numpy()).all()
+    assert torch.isfinite(logits).all()
 
 
 def test_value_and_movesleft_shapes():
-    cls = tf.random.normal((3, 256))
-    assert tuple(ValueHead()(cls).shape) == (3, 3)
-    ml = MovesLeftHead()(cls)
+    cls = torch.randn(3, 256)
+    assert tuple(ValueHead(256)(cls).shape) == (3, 3)
+    ml = MovesLeftHead(256)(cls)
     assert tuple(ml.shape) == (3, 1)
-    assert (ml.numpy() >= 0).all()  # softplus is non-negative
+    assert (ml >= 0).all()

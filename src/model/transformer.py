@@ -1,93 +1,91 @@
-"""ChessTransformer: token board -> (policy_logits, wdl_logits, moves_left)."""
+"""ChessTransformer (PyTorch): token board -> (policy_logits, wdl_logits, moves_left)."""
 
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from src.model.smolgen import Smolgen
 from src.model.heads import PolicyHead, ValueHead, MovesLeftHead
 
 
-class BiasedMHA(layers.Layer):
+class BiasedMHA(nn.Module):
     """Multi-head self-attention with an additive per-head bias on the logits."""
 
-    def __init__(self, n_heads, d_model, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, d_model, n_heads):
+        super().__init__()
         self.h = n_heads
         self.d = d_model
         self.dh = d_model // n_heads
-        self.wq = layers.Dense(d_model)
-        self.wk = layers.Dense(d_model)
-        self.wv = layers.Dense(d_model)
-        self.wo = layers.Dense(d_model)
+        self.wq = nn.Linear(d_model, d_model)
+        self.wk = nn.Linear(d_model, d_model)
+        self.wv = nn.Linear(d_model, d_model)
+        self.wo = nn.Linear(d_model, d_model)
 
-    def _split(self, t, b, seq):
-        return tf.transpose(tf.reshape(t, [b, seq, self.h, self.dh]), [0, 2, 1, 3])
+    def forward(self, x, bias):  # x: [B,T,d]; bias: [B,h,T,T]
+        b, t, _ = x.shape
 
-    def call(self, x, bias):  # x: [B,T,d]; bias: [B,h,T,T]
-        b = tf.shape(x)[0]
-        t = tf.shape(x)[1]
-        q = self._split(self.wq(x), b, t)
-        k = self._split(self.wk(x), b, t)
-        v = self._split(self.wv(x), b, t)
-        scores = tf.matmul(q, k, transpose_b=True) / (float(self.dh) ** 0.5) + bias
-        a = tf.nn.softmax(scores, axis=-1)
-        o = tf.matmul(a, v)  # [B,h,T,dh]
-        o = tf.reshape(tf.transpose(o, [0, 2, 1, 3]), [b, t, self.d])
+        def split(y):
+            return y.reshape(b, t, self.h, self.dh).transpose(1, 2)  # [B,h,T,dh]
+
+        q, k, v = split(self.wq(x)), split(self.wk(x)), split(self.wv(x))
+        scores = torch.matmul(q, k.transpose(-1, -2)) / (self.dh ** 0.5) + bias
+        a = torch.softmax(scores, dim=-1)
+        o = torch.matmul(a, v).transpose(1, 2).reshape(b, t, self.d)
         return self.wo(o)
 
 
-class EncoderLayer(layers.Layer):
-    def __init__(self, cfg, shared_smolgen_out, **kwargs):
-        super().__init__(**kwargs)
-        self.ln1 = layers.LayerNormalization()
-        self.attn = BiasedMHA(cfg.n_heads, cfg.d_model)
-        self.smolgen = Smolgen(cfg.n_heads, cfg.smolgen_compress,
+class EncoderLayer(nn.Module):
+    def __init__(self, cfg, shared_smolgen_out):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(cfg.d_model)
+        self.attn = BiasedMHA(cfg.d_model, cfg.n_heads)
+        self.smolgen = Smolgen(cfg.d_model, cfg.n_heads, cfg.smolgen_compress,
                                cfg.smolgen_hidden, cfg.smolgen_gen, shared_smolgen_out)
-        self.ln2 = layers.LayerNormalization()
-        self.ffn = keras.Sequential([
-            layers.Dense(cfg.d_ff, activation="gelu"),
-            layers.Dense(cfg.d_model),
-        ])
+        self.ln2 = nn.LayerNorm(cfg.d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(cfg.d_model, cfg.d_ff), nn.GELU(), nn.Linear(cfg.d_ff, cfg.d_model)
+        )
 
-    def call(self, x):  # x: [B, 65, d]  (index 0 = CLS, 1..64 = squares)
+    def forward(self, x):  # x: [B, 65, d] (index 0 = CLS, 1..64 = squares)
         h = self.ln1(x)
-        bias64 = self.smolgen(h[:, 1:, :])                       # [B,h,64,64]
-        bias = tf.pad(bias64, [[0, 0], [0, 0], [1, 0], [1, 0]])  # CLS row/col = 0 -> [B,h,65,65]
+        bias64 = self.smolgen(h[:, 1:, :])             # [B,h,64,64]
+        bias = F.pad(bias64, (1, 0, 1, 0))             # CLS row/col = 0 -> [B,h,65,65]
         x = x + self.attn(h, bias)
         x = x + self.ffn(self.ln2(x))
         return x
 
 
-class ChessTransformer(keras.Model):
-    def __init__(self, cfg, **kwargs):
-        super().__init__(**kwargs)
+class ChessTransformer(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
         self.cfg = cfg
         d = cfg.d_model
-        self.piece_emb = layers.Embedding(13, d)
-        self.pos_emb = self.add_weight(name="pos_emb", shape=(1, 64, d),
-                                       initializer="random_normal", trainable=True)
-        self.cls = self.add_weight(name="cls", shape=(1, 1, d),
-                                   initializer="random_normal", trainable=True)
-        self.state_mlp = keras.Sequential([
-            layers.Dense(d, activation="gelu"),
-            layers.Dense(d),
-        ])
-        shared_smolgen_out = layers.Dense(64 * 64, use_bias=False)
-        self.enc = [EncoderLayer(cfg, shared_smolgen_out, name=f"encoder_layer_{i}")
-                    for i in range(cfg.n_layers)]
-        self.final_ln = layers.LayerNormalization()
-        self.policy_head = PolicyHead()
-        self.value_head = ValueHead()
-        self.moves_left_head = MovesLeftHead()
+        self.piece_emb = nn.Embedding(13, d)
+        self.pos_emb = nn.Parameter(torch.randn(1, 64, d) * 0.02)
+        self.cls = nn.Parameter(torch.randn(1, 1, d) * 0.02)
+        self.state_mlp = nn.Sequential(
+            nn.Linear(cfg.state_dim, d), nn.GELU(), nn.Linear(d, d)
+        )
+        shared_smolgen_out = nn.Linear(cfg.smolgen_gen, 64 * 64, bias=False)
+        self.enc = nn.ModuleList(
+            [EncoderLayer(cfg, shared_smolgen_out) for _ in range(cfg.n_layers)]
+        )
+        self.final_ln = nn.LayerNorm(d)
+        self.policy_head = PolicyHead(d)
+        self.value_head = ValueHead(d)
+        self.moves_left_head = MovesLeftHead(d)
 
-    def call(self, square_tokens, state_features, training=False):
+    def forward(self, square_tokens, state_features):
+        """square_tokens: [B,64] long; state_features: [B,18] float.
+
+        Returns (policy_logits[B,P], wdl_logits[B,3], moves_left[B,1]).
+        """
         pe = self.piece_emb(square_tokens) + self.pos_emb       # [B,64,d]
-        cond = self.state_mlp(state_features)[:, None, :]       # [B,1,d]
+        cond = self.state_mlp(state_features).unsqueeze(1)      # [B,1,d]
         pe = pe + cond
-        b = tf.shape(pe)[0]
-        cls = tf.tile(self.cls, [b, 1, 1]) + cond               # [B,1,d]
-        x = tf.concat([cls, pe], axis=1)                        # [B,65,d]
+        b = pe.shape[0]
+        cls = self.cls.expand(b, -1, -1) + cond                 # [B,1,d]
+        x = torch.cat([cls, pe], dim=1)                         # [B,65,d]
         for layer in self.enc:
             x = layer(x)
         x = self.final_ln(x)
@@ -95,6 +93,8 @@ class ChessTransformer(keras.Model):
         sq_out = x[:, 1:, :]
         return self.policy_head(sq_out), self.value_head(cls_out), self.moves_left_head(cls_out)
 
-    @tf.function(reduce_retracing=True)
+    @torch.no_grad()
     def predict_batch(self, square_tokens, state_features):
-        return self.call(square_tokens, state_features, training=False)
+        """Eval-mode forward for inference (no grad)."""
+        self.eval()
+        return self.forward(square_tokens, state_features)
