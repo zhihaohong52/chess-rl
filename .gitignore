@@ -24,7 +24,7 @@ env/
 # Project specific
 checkpoints/
 logs/
-data/
+/data/
 *.h5
 *.keras
 *.weights.*
