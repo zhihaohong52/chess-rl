@@ -79,3 +79,21 @@ class Config:
     main_simulations = 200
     main_games = 100
     refinement_simulations = 400
+
+    # Transformer architecture (Phase 1 rebuild)
+    d_model = 256
+    n_layers = 8
+    n_heads = 8
+    d_ff = 1024
+    smolgen_compress = 32
+    smolgen_hidden = 128
+    smolgen_gen = 128
+    state_dim = 18
+    transformer_dropout = 0.0
+
+    # Distillation training (Phase 1)
+    distill_batch_size = 1024
+    distill_lr = 3e-4
+    distill_warmup_steps = 2000
+    distill_total_steps = 60000
+    distill_policy_temperature = 1.0
