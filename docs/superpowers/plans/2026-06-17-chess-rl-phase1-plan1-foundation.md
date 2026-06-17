@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implemented in PyTorch (2026-06-18).** This plan's code blocks are TensorFlow/Keras and are now superseded — the project moved to PyTorch + MPS. See the committed `src/model/{transformer,smolgen,heads}.py` and the spec's update banner for the authoritative implementation.
+
 **Goal:** Build the board-as-tokens encoder and the transformer policy/value/moves-left network (with smolgen), fully unit-tested, with no data/training/MCTS — the foundation every later milestone consumes.
 
 **Architecture:** A 64-square token board representation in canonical (side-to-move) orientation plus an 18-dim global-state vector → a ~10–11M-param transformer (8 layers, d_model 256, 8 heads, smolgen attention bias) → an attention-style from→to policy head over the existing 1924-action move space, a 3-way WDL value head, and a moves-left head.

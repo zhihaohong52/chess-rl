@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implemented in PyTorch (2026-06-18).** TFRecord/`tf.data` here are superseded by **npz shards + torch `Dataset`/`DataLoader`** (`make_dataloader`). See committed `src/data/{preencode,dataset}.py`.
+
 **Goal:** Turn Stockfish-labeled chess positions into pre-encoded TFRecord shards and a `tf.data` loader that yields training batches matching the frozen shard contract.
 
 **Architecture:** A `LabeledPosition` (FEN + per-move policy + WDL + moves-left) is the universal input. Source readers (ChessBench action-value; a Kaggle CSV smoke source) emit `LabeledPosition`s; `preencode` canonicalizes each via Plan 1's `token_encoder`/`orientation`/`move_encoder` and writes TFRecord shards; `dataset` reads shards and scatters the sparse policy into a dense `[P]` target.

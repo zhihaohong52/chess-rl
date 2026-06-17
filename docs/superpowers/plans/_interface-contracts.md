@@ -1,5 +1,14 @@
 # Phase 1 Interface Contracts (FROZEN)
 
+> **Update (2026-06-18): the project is now PyTorch (+MPS), not TensorFlow.** The
+> conceptual contracts (tokenization, orientation, net I/O shapes, evaluator,
+> losses, shard fields) still hold, but the concrete types changed: the net is an
+> `nn.Module` (`forward(square_tokens[B,64] long, state_features[B,18] float) ->
+> (policy_logits, wdl_logits, moves_left)`, plus `predict_batch` = no-grad eval);
+> data shards are `.npz` (not TFRecord) loaded via `make_dataloader(...)` →
+> torch `DataLoader`; checkpoints are `.pt` via `state_dict`. See the committed
+> code for exact signatures.
+
 These signatures are **fixed**. Every milestone plan implements or consumes them
 **exactly** as written. If something here is ambiguous or looks wrong, a plan
 author must flag it as a `contract_gap` — **do not silently invent a different

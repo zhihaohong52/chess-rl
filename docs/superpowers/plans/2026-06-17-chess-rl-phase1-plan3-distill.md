@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implemented in PyTorch (2026-06-18).** Losses/metrics/trainer are torch (AdamW + LambdaLR warmup→cosine; `torch.no_grad` eval; `.pt` checkpoints). See committed `src/training/distill_{losses,metrics,trainer}.py`.
+
 **Goal:** Train the `ChessTransformer` by supervised distillation on pre-encoded shards — policy KL + WDL cross-entropy + moves-left Huber — with validation metrics, checkpointing, a CLI, budget go/no-go gates, and a rented-GPU runbook.
 
 **Architecture:** A `DistillTrainer` wraps the Plan 1 network and a Plan 2 `tf.data` dataset; an AdamW optimizer with warmup→cosine LR drives a mixed-precision `train_step`; validation tracks policy KL, value-sign accuracy, and top-1 move match; the best checkpoint by validation policy-loss is kept.

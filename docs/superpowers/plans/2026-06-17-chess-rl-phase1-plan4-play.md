@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implemented in PyTorch + MPS (2026-06-18).** The evaluator is torch (auto-selects MPS); MCTS/node are framework-agnostic (unchanged). MCTS hit **250 sims/sec on MPS** — the >50 playability gate the CPU TF build failed. See committed `src/model/evaluator.py`, `src/mcts/batched_mcts.py`, `uci.py`.
+
 **Goal:** Wrap the trained transformer in an MCTS-facing evaluator, add batched-eval + virtual-loss + tree-reuse MCTS, and play locally on the M1 over UCI.
 
 **Architecture:** `TransformerEvaluator` turns a board into `(policy: {Move→prob}, value)` via the Plan 1 network (canonicalize → encode → mask legal → softmax → un-mirror). `BatchedMCTS` runs PUCT directly on `chess.Board`, collecting a batch of leaves per network call (virtual loss to diversify), with WDL value backup and optional tree reuse across moves. `uci.py` is rewired to this stack.

@@ -5,6 +5,17 @@
 - **Author:** James (with Claude)
 - **Supersedes:** the current conv-net + self-play-first pipeline (kept as dormant baseline)
 
+> **Update (2026-06-18): framework changed to PyTorch.** During implementation we
+> hit TensorFlow's broken Apple-Silicon GPU support (`tensorflow-metal` is
+> ABI-incompatible with TF 2.21 → CPU-only → MCTS too slow to play). We switched
+> the model + training stack to **PyTorch + MPS**, which restored M1 GPU
+> acceleration (MCTS **250 sims/sec** on MPS vs 22 on CPU TF). This supersedes the
+> "TensorFlow/Keras" choice (D7) and the TF-specific mechanics below: `tf.data`/
+> TFRecord → npz shards + torch `Dataset`/`DataLoader`; `@tf.function`/
+> `predict_batch` → eager + `torch.no_grad`; `.weights.h5` → `.pt`; mixed
+> precision via `torch.autocast`. Architecture, data, MCTS, eval, and all targets
+> are unchanged. Implemented on branch `feat/transformer-rebuild`.
+
 ---
 
 ## 1. Context & Motivation
@@ -90,7 +101,7 @@ reality explicit and the following decisions were taken:
 | D4 | Smolgen | **Included in Phase 1**, gated by an A/B run before full spend |
 | D5 | MCTS upgrades | **All three**: batched eval + tree reuse + virtual loss |
 | D6 | Data pre-encoding | **On the M1** (free); upload packed shards to the GPU box |
-| D7 | Framework | Stay in **TensorFlow/Keras** (reuse MCTS/UCI/move-encoder); no JAX port |
+| D7 | Framework | ~~Stay in TensorFlow/Keras~~ → **PyTorch + MPS** (see 2026-06-18 update banner; TF's M1 GPU support was broken). Framework-agnostic code (MCTS/UCI/move-encoder/eval) reused either way. |
 | D8 | Value target | **WDL 3-way** softmax (32-bin win% categorical noted as a refinement) |
 
 ---
