@@ -73,6 +73,48 @@ class ShardDataset(Dataset):
         return (sq, sf), (policy, wdl, ml)
 
 
+class AVShardDataset(Dataset):
+    """Action-value shards: each example is one (state, sampled action, win%)."""
+
+    def __init__(self, shard_paths):
+        sq_parts, sf_parts, ai_parts, win_parts = [], [], [], []
+        for p in shard_paths:
+            d = np.load(p)
+            sq_parts.append(d["square_tokens"])    # [n, 64] int8
+            sf_parts.append(d["state_features"])   # [n, 18] float32
+            ai_parts.append(d["action_idx"])       # [n]     int32
+            win_parts.append(d["win"])             # [n]     float32
+        self._sq = np.concatenate(sq_parts, axis=0)
+        self._sf = np.concatenate(sf_parts, axis=0)
+        self._ai = np.concatenate(ai_parts, axis=0)
+        self._win = np.concatenate(win_parts, axis=0)
+
+    def __len__(self) -> int:
+        return len(self._sq)
+
+    def __getitem__(self, i: int):
+        sq = torch.from_numpy(self._sq[i].astype(np.int64))   # [64] long
+        sf = torch.from_numpy(self._sf[i])                     # [18] float32
+        ai = torch.tensor(int(self._ai[i]), dtype=torch.long)  # scalar long
+        win = torch.tensor(float(self._win[i]), dtype=torch.float32)  # scalar
+        return (sq, sf), (ai, win)
+
+
+def make_av_dataloader(
+    shard_paths,
+    batch_size: int,
+    shuffle: bool = True,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Build an action-value DataLoader over npz shards.
+
+    Returns batches of shape:
+      ((sq[B,64] long, sf[B,18] float32), (action_idx[B] long, win[B] float32))
+    """
+    ds = AVShardDataset(shard_paths)
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+
+
 def make_dataloader(
     shard_paths,
     batch_size: int,

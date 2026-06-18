@@ -124,6 +124,30 @@ def _build_position(fen, moves, wins, temperature):
                            moves_left=_DEFAULT_MOVES_LEFT)
 
 
+def iter_chessbench_actionvalue(paths, max_positions=None):
+    """Yield raw (fen, uci_move, win_prob) action-value samples — NO grouping.
+
+    The ChessBench *train* shards are pointwise and globally shuffled: each FEN
+    appears ~once per file (one randomly-sampled legal move), so grouping by FEN
+    is pointless. The native objective for this data is action-value regression:
+    predict win_prob for the single (state, action) sample. `win_prob` is from the
+    side-to-move's perspective, matching our canonical (side-to-move) orientation.
+
+    Streams record-by-record (constant memory, no dict), so it scales to the full
+    multi-GB shards. `max_positions` caps how many samples are emitted.
+    """
+    if isinstance(paths, str):
+        paths = [paths]
+    emitted = 0
+    for path in paths:
+        for record in read_records(path):
+            fen, move, win = decode_action_value(record)
+            yield fen, move, float(win)
+            emitted += 1
+            if max_positions is not None and emitted >= max_positions:
+                return
+
+
 def iter_chessbench(paths, temperature: float = 0.1, max_positions=None):
     """Yield LabeledPositions from ChessBench action_value .bag file(s).
 

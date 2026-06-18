@@ -10,7 +10,7 @@ from src.game.move_encoder import get_move_encoder
 
 
 class TransformerEvaluator:
-    def __init__(self, net, use_fp16: bool = False, device=None):
+    def __init__(self, net, use_fp16: bool = False, device=None, objective: str = "policy"):
         if device is None:
             device = "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = device
@@ -18,6 +18,9 @@ class TransformerEvaluator:
         self.net.eval()
         self.me = get_move_encoder()
         self.use_fp16 = use_fp16
+        if objective not in ("policy", "action_value"):
+            raise ValueError(f"objective must be 'policy' or 'action_value', got {objective}")
+        self.objective = objective
 
     def evaluate(self, board, repetition_count: int = 0):
         return self.evaluate_batch([board], [repetition_count])[0]
@@ -43,10 +46,17 @@ class TransformerEvaluator:
                 continue
             idxs = [self.me.encode(to_canonical_move(mv, b.turn)) for mv in legal]
             logits = pol_logits[i][idxs]
-            logits = logits - logits.max()
-            probs = np.exp(logits)
-            probs = probs / probs.sum()
-            policy = {mv: float(p) for mv, p in zip(legal, probs)}
-            value = float(wdl[i, 0] - wdl[i, 2])  # P(W) - P(L), side-to-move POV
+            if self.objective == "action_value":
+                # sigmoid(logit) = predicted Q(s,a) = win%, side-to-move POV.
+                q = 1.0 / (1.0 + np.exp(-logits))
+                probs = q / q.sum() if q.sum() > 0 else np.full(len(q), 1.0 / len(q))
+                policy = {mv: float(p) for mv, p in zip(legal, probs)}
+                value = float(2.0 * q.max() - 1.0)  # V(s) ~ best move's win%, in [-1,1]
+            else:
+                logits = logits - logits.max()
+                probs = np.exp(logits)
+                probs = probs / probs.sum()
+                policy = {mv: float(p) for mv, p in zip(legal, probs)}
+                value = float(wdl[i, 0] - wdl[i, 2])  # P(W) - P(L), side-to-move POV
             out.append((policy, value))
         return out
