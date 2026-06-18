@@ -30,3 +30,9 @@ def test_routing_missing_sidecar_requires_explicit(tmp_path):
     net2, ev2 = load_for_eval(ckpt, objective="policy", preset="baseline-v1",
                               device="cpu")
     assert ev2.objective == "policy"
+
+
+def test_explicit_arg_overrides_sidecar(tmp_path):
+    ckpt = _save_baseline(tmp_path, "action_value")
+    _, ev = load_for_eval(ckpt, objective="policy", device="cpu")
+    assert ev.objective == "policy"

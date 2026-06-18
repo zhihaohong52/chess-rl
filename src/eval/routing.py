@@ -21,8 +21,10 @@ def load_for_eval(ckpt_path, objective=None, preset=None, device=None,
     required.
     """
     meta = read_sidecar(ckpt_path) or {}
-    preset = preset or meta.get("preset")
-    objective = objective or meta.get("objective")
+    if preset is None:
+        preset = meta.get("preset")
+    if objective is None:
+        objective = meta.get("objective")
     if preset is None or objective is None:
         raise ValueError(
             f"no sidecar for {ckpt_path} and preset/objective not given; "
