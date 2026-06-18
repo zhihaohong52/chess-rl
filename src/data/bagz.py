@@ -11,37 +11,49 @@ yields the index pointer.
 `.bagz` files store each record individually zstd-compressed.
 """
 
+import mmap
+import os
 import struct
 
 
 def read_records(path, decompress=None):
-    """Yield raw record bytes from a .bag (or zstd .bagz) file."""
+    """Yield raw record bytes from a .bag (or zstd .bagz) file.
+
+    Uses mmap so large (multi-GB) shards are paged on demand rather than read
+    fully into RAM.
+    """
     if decompress is None:
         decompress = path.endswith(".bagz")
-    with open(path, "rb") as fh:
-        data = fh.read()
-    size = len(data)
-    if size == 0:
-        return
-    if size < 8:
-        raise ValueError(f"bagz file too small: {path}")
-    index_start = struct.unpack("<Q", data[-8:])[0]
-    if index_start > size or (size - index_start) % 8 != 0:
-        raise ValueError(f"corrupt bagz index in {path}")
-    num_records = (size - index_start) // 8
-    dctx = None
-    if decompress:
-        import zstandard as zstd  # lazy: only .bagz needs it
-        dctx = zstd.ZstdDecompressor()
-    prev = 0
-    for i in range(num_records):
-        off = index_start + i * 8
-        (end,) = struct.unpack("<q", data[off:off + 8])
-        chunk = data[prev:end]
-        prev = end
-        if dctx is not None and chunk:
-            chunk = dctx.decompress(chunk)
-        yield chunk
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        size = os.fstat(fd).st_size
+        if size == 0:
+            return
+        if size < 8:
+            raise ValueError(f"bagz file too small: {path}")
+        data = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        try:
+            index_start = struct.unpack("<Q", data[-8:])[0]
+            if index_start > size or (size - index_start) % 8 != 0:
+                raise ValueError(f"corrupt bagz index in {path}")
+            num_records = (size - index_start) // 8
+            dctx = None
+            if decompress:
+                import zstandard as zstd  # lazy: only .bagz needs it
+                dctx = zstd.ZstdDecompressor()
+            prev = 0
+            for i in range(num_records):
+                off = index_start + i * 8
+                (end,) = struct.unpack("<q", data[off:off + 8])
+                chunk = data[prev:end]
+                prev = end
+                if dctx is not None and chunk:
+                    chunk = dctx.decompress(chunk)
+                yield bytes(chunk)
+        finally:
+            data.close()
+    finally:
+        os.close(fd)
 
 
 def write_records(records, path):

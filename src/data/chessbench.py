@@ -13,6 +13,7 @@
 
 import csv
 import struct
+import sys
 
 import chess
 import numpy as np
@@ -151,7 +152,7 @@ def iter_chessbench(paths, temperature: float = 0.1, max_positions=None):
                 g = ([], [])
                 groups[fen] = g
                 order.append(fen)
-            g[0].append(move)
+            g[0].append(sys.intern(move))  # ~1924 unique moves -> share objects
             g[1].append(win)
         for fen in order:
             moves, wins = groups[fen]
