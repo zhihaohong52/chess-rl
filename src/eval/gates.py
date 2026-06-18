@@ -17,6 +17,21 @@ from src.game.move_encoder import get_move_encoder
 from src.eval import metrics_core as mc
 
 
+def _best_legal_move(net, device, board, me):
+    """Legal move with the highest policy logit (batch=1 forward). None if no legal moves."""
+    legal = list(board.legal_moves)
+    if not legal:
+        return None
+    sq, sf = encode_position(board, 0)
+    sq_t = torch.tensor(sq[None], dtype=torch.long, device=device)
+    sf_t = torch.tensor(sf[None], dtype=torch.float32, device=device)
+    with torch.no_grad():
+        pol, _, _ = net.predict_batch(sq_t, sf_t)
+    pol = pol[0].cpu().numpy()
+    idxs = [me.encode(to_canonical_move(mv, board.turn)) for mv in legal]
+    return legal[int(np.argmax(pol[idxs]))]
+
+
 def raw_top1(net, device, puzzles) -> float:
     """Argmax legal-move accuracy (no search). Objective-agnostic."""
     me = get_move_encoder()
@@ -25,19 +40,8 @@ def raw_top1(net, device, puzzles) -> float:
         return 0.0
     correct = 0
     for pz in puzzles:
-        board = chess.Board(pz.fen)
-        legal = list(board.legal_moves)
-        if not legal:
-            continue
-        sq, sf = encode_position(board, 0)
-        sq_t = torch.tensor(sq[None], dtype=torch.long, device=device)
-        sf_t = torch.tensor(sf[None], dtype=torch.float32, device=device)
-        with torch.no_grad():
-            pol, _, _ = net.predict_batch(sq_t, sf_t)
-        pol = pol[0].cpu().numpy()
-        idxs = [me.encode(to_canonical_move(mv, board.turn)) for mv in legal]
-        best = legal[int(np.argmax(pol[idxs]))]
-        if best == pz.solution_moves[0]:
+        best = _best_legal_move(net, device, chess.Board(pz.fen), me)
+        if best is not None and best == pz.solution_moves[0]:
             correct += 1
     return correct / len(puzzles)
 
@@ -65,17 +69,8 @@ def mate_in_one_acc(net, device, positions) -> float:
         return 0.0
     correct = 0
     for fen, uci in positions:
-        board = chess.Board(fen)
-        legal = list(board.legal_moves)
-        sq, sf = encode_position(board, 0)
-        sq_t = torch.tensor(sq[None], dtype=torch.long, device=device)
-        sf_t = torch.tensor(sf[None], dtype=torch.float32, device=device)
-        with torch.no_grad():
-            pol, _, _ = net.predict_batch(sq_t, sf_t)
-        pol = pol[0].cpu().numpy()
-        idxs = [me.encode(to_canonical_move(mv, board.turn)) for mv in legal]
-        best = legal[int(np.argmax(pol[idxs]))]
-        if best == chess.Move.from_uci(uci):
+        best = _best_legal_move(net, device, chess.Board(fen), me)
+        if best is not None and best == chess.Move.from_uci(uci):
             correct += 1
     return correct / len(positions)
 

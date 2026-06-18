@@ -34,3 +34,9 @@ def test_run_gates_smoke_returns_expected_keys():
     assert "raw_top1@20" in out
     assert "mate_in_1" in out
     assert "batch_latency_ms" in out
+
+
+def test_gates_return_zero_on_empty_inputs():
+    net, _ = build_model("baseline-v1")
+    assert raw_top1(net, "cpu", []) == 0.0
+    assert mate_in_one_acc(net, "cpu", []) == 0.0
