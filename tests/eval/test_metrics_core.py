@@ -35,7 +35,13 @@ def test_wdl_cross_entropy_and_sign_acc():
     assert value_sign_acc(wdl_logits, wdl_target) == 1.0
 
 
-def test_draw_calibration_reports_mean_draw_prob():
+def test_draw_calibration_gap_small_when_matched():
     wdl_logits = torch.tensor([[0.0, 10.0, 0.0], [0.0, 10.0, 0.0]])  # ~all draw
-    wdl_target = torch.tensor([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
+    wdl_target = torch.tensor([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]])    # all draw
+    assert draw_calibration(wdl_logits, wdl_target) < 0.01
+
+
+def test_draw_calibration_gap_large_when_mismatched():
+    wdl_logits = torch.tensor([[0.0, 10.0, 0.0]])  # predicts draw
+    wdl_target = torch.tensor([[1.0, 0.0, 0.0]])   # actually win
     assert draw_calibration(wdl_logits, wdl_target) > 0.99

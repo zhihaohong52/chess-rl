@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 def policy_topk_match(pol_logits, target_probs, k: int) -> float:
     """Fraction of rows where the target's argmax move is in the model's top-k."""
+    k = min(k, pol_logits.shape[1])
     tgt_best = target_probs.argmax(dim=1)                 # [B]
     topk = pol_logits.topk(k, dim=1).indices              # [B,k]
     hit = (topk == tgt_best.unsqueeze(1)).any(dim=1)      # [B]
@@ -26,6 +27,7 @@ def legal_mass(pol_logits, target_probs) -> float:
 
 
 def wdl_cross_entropy(wdl_logits, wdl_target) -> float:
+    """Mean soft cross-entropy of WDL prediction vs target distribution."""
     logp = F.log_softmax(wdl_logits, dim=1)
     return float(-(wdl_target * logp).sum(dim=1).mean())
 
@@ -39,6 +41,9 @@ def value_sign_acc(wdl_logits, wdl_target) -> float:
 
 
 def draw_calibration(wdl_logits, wdl_target) -> float:
-    """Mean predicted draw probability (compare against target draw rate)."""
+    """Absolute gap between mean predicted draw prob and mean target draw prob
+    (0 = perfectly calibrated on the draw class)."""
     p = F.softmax(wdl_logits, dim=1)
-    return float(p[:, 1].mean())
+    pred_draw = p[:, 1].mean()
+    target_draw = wdl_target[:, 1].mean()
+    return float((pred_draw - target_draw).abs())
