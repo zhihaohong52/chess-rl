@@ -130,8 +130,7 @@ class DistillTrainer:
         return best
 
     def _save_ckpt(self, ckpt_dir, name, objective, meta):
-        import os as _os
-        path = _os.path.join(ckpt_dir, name)
+        path = os.path.join(ckpt_dir, name)
         torch.save(self.net.state_dict(), path)
         if meta is not None:
             full = dict(meta)
