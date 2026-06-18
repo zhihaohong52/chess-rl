@@ -11,8 +11,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import torch
-
 from src.eval.routing import load_for_eval
 from src.eval.gates import run_gates
 from src.training.checkpoint_meta import read_sidecar

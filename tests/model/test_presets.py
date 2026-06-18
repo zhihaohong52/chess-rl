@@ -24,3 +24,11 @@ def test_build_baseline_v1_param_count_is_locked():
 def test_unknown_preset_raises():
     with pytest.raises(ValueError):
         resolve_config("does-not-exist")
+
+
+def test_override_is_applied(monkeypatch):
+    monkeypatch.setitem(PRESETS, "tmp-test", {"d_model": 999, "n_layers": 3})
+    cfg = resolve_config("tmp-test")
+    assert cfg.d_model == 999          # override wins over Config default
+    assert cfg.n_layers == 3
+    assert cfg.n_heads == 8            # untouched Config default still present
