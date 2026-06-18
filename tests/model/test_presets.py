@@ -22,5 +22,5 @@ def test_build_baseline_v1_param_count_is_locked():
 
 
 def test_unknown_preset_raises():
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError):
         resolve_config("does-not-exist")

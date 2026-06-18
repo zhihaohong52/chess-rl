@@ -21,15 +21,19 @@ PRESETS = {
 def resolve_config(preset_name: str) -> SimpleNamespace:
     """Return a config namespace = Config defaults with the preset's overrides."""
     if preset_name not in PRESETS:
-        raise KeyError(
+        raise ValueError(
             f"unknown preset {preset_name!r}; known: {sorted(PRESETS)}"
         )
+    # NOTE: Config has derived fields (extra_planes, input_planes, input_shape)
+    # computed at class-definition time. Overriding their source fields
+    # (board_size, include_ep_plane, history_length) in a preset will NOT recompute
+    # the derived fields; override the derived fields explicitly if a preset needs them.
     base = {k: v for k, v in vars(Config).items() if not k.startswith("__")}
     base.update(PRESETS[preset_name])
     return SimpleNamespace(**base)
 
 
-def build_model(preset_name: str):
+def build_model(preset_name: str) -> tuple["ChessTransformer", SimpleNamespace]:
     """Build a ChessTransformer for the named preset.
 
     Returns (net, resolved_config).
