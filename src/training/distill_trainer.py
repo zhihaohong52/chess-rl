@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from src.training.distill_losses import total_loss
 from src.training.distill_metrics import value_sign_accuracy, top1_move_match
+from src.training.checkpoint_meta import write_sidecar
 
 
 def _make_scheduler(optimizer, warmup_steps: int, total_steps: int, min_lr_frac: float = 0.05):
@@ -106,7 +107,7 @@ class DistillTrainer:
         return {"val_av_bce": bce / n, "val_av_mae": mae / n}
 
     def fit_av(self, train_loader, steps: int, val_loader=None, val_every: int = 500,
-               ckpt_dir: str = "checkpoints/distill_av", log_every: int = 100):
+               ckpt_dir: str = "checkpoints/distill_av", log_every: int = 100, meta=None):
         os.makedirs(ckpt_dir, exist_ok=True)
         best = float("inf")
         it = iter(train_loader)
@@ -124,9 +125,18 @@ class DistillTrainer:
                 print(f"step {step} loss {loss:.4f} {metrics}", flush=True)
                 if metrics["val_av_bce"] < best:
                     best = metrics["val_av_bce"]
-                    torch.save(self.net.state_dict(), os.path.join(ckpt_dir, "best.pt"))
-        torch.save(self.net.state_dict(), os.path.join(ckpt_dir, "last.pt"))
+                    self._save_ckpt(ckpt_dir, "best.pt", "action_value", meta)
+        self._save_ckpt(ckpt_dir, "last.pt", "action_value", meta)
         return best
+
+    def _save_ckpt(self, ckpt_dir, name, objective, meta):
+        import os as _os
+        path = _os.path.join(ckpt_dir, name)
+        torch.save(self.net.state_dict(), path)
+        if meta is not None:
+            full = dict(meta)
+            full["objective"] = objective
+            write_sidecar(path, full)
 
     def evaluate(self, val_loader, max_batches: int = 50):
         self.net.eval()
@@ -150,7 +160,7 @@ class DistillTrainer:
         }
 
     def fit(self, train_loader, steps: int, val_loader=None, val_every: int = 1000,
-            ckpt_dir: str = "checkpoints/distill"):
+            ckpt_dir: str = "checkpoints/distill", meta=None):
         os.makedirs(ckpt_dir, exist_ok=True)
         best = float("inf")
         it = iter(train_loader)
@@ -166,6 +176,6 @@ class DistillTrainer:
                 print(f"step {step} loss {loss:.4f} {metrics}")
                 if metrics["val_policy_loss"] < best:
                     best = metrics["val_policy_loss"]
-                    torch.save(self.net.state_dict(), os.path.join(ckpt_dir, "best.pt"))
-        torch.save(self.net.state_dict(), os.path.join(ckpt_dir, "last.pt"))
+                    self._save_ckpt(ckpt_dir, "best.pt", "policy", meta)
+        self._save_ckpt(ckpt_dir, "last.pt", "policy", meta)
         return best
