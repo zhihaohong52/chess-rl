@@ -77,7 +77,9 @@ def main():
     rows = [run_row(c, device=args.device, objective=args.objective,
                     preset=args.preset, gate_kwargs=gate_kwargs)
             for c in args.ckpt]
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(args.out, "w") as fh:
         fh.write(to_markdown(rows))
     csv_path = os.path.splitext(args.out)[0] + ".csv"
