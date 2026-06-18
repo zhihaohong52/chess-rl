@@ -48,11 +48,11 @@ def raw_top1(net, device, puzzles):
     return correct / len(puzzles)
 
 
-def mcts_top1(net, puzzles, simulations):
+def mcts_top1(net, puzzles, simulations, objective="action_value"):
     from src.model.evaluator import TransformerEvaluator
     from src.mcts.batched_mcts import BatchedMCTS
     cfg = Config()
-    ev = TransformerEvaluator(net, objective="action_value")
+    ev = TransformerEvaluator(net, objective=objective)
     mcts = BatchedMCTS(ev, cfg, num_simulations=simulations)
     correct = 0
     for pz in puzzles:
@@ -71,6 +71,9 @@ def main():
     ap.add_argument("--max-puzzles", type=int, default=600)
     ap.add_argument("--simulations", type=int, default=100,
                     help="MCTS sims; 0 to skip MCTS gauge")
+    ap.add_argument("--objective", choices=["action_value", "policy"],
+                    default="action_value",
+                    help="evaluator semantics for MCTS (must match how the model was trained)")
     args = ap.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -85,7 +88,7 @@ def main():
     print(f"raw policy top-1: {r:.3f} ({int(r*len(puzzles))}/{len(puzzles)})", flush=True)
 
     if args.simulations > 0:
-        m = mcts_top1(net, puzzles, args.simulations)
+        m = mcts_top1(net, puzzles, args.simulations, objective=args.objective)
         print(f"MCTS-{args.simulations} top-1: {m:.3f} ({int(m*len(puzzles))}/{len(puzzles)})",
               flush=True)
 
