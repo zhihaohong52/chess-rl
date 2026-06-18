@@ -33,7 +33,7 @@ if _REPO_ROOT not in sys.path:
 
 from src.eval.arena import play_match, MatchResult
 from src.eval.elo import elo_diff, gauntlet_elo
-from src.eval.puzzles import load_puzzles, puzzle_accuracy
+from src.eval.puzzles import load_puzzles, load_chessbench_puzzles, puzzle_accuracy
 from src.eval.stockfish_opponent import StockfishOpponent, stockfish_available
 
 
@@ -47,22 +47,18 @@ def _random_mover(board: chess.Board) -> Optional[chess.Move]:
 
 
 def _build_transformer_mover(model_path: str, num_simulations: int):
-    """Build a move-producer backed by TransformerEvaluator + BatchedMCTS (Plan 4)."""
-    # Lazy imports so the CLI can run --help without TensorFlow.
+    """Build a move-producer backed by TransformerEvaluator + BatchedMCTS (PyTorch)."""
+    # Lazy imports so the CLI can run --help without torch.
     from src.model.evaluator import TransformerEvaluator  # noqa: PLC0415
     from src.model.transformer import ChessTransformer  # noqa: PLC0415
     from src.mcts.batched_mcts import BatchedMCTS  # noqa: PLC0415
-    from src.game.token_encoder import encode_batch  # noqa: PLC0415
     from config import Config  # noqa: PLC0415
-    import tensorflow as tf  # noqa: PLC0415
+    import torch  # noqa: PLC0415
 
     config = Config()
     net = ChessTransformer(config)
-    # Build the network once (forward pass) before loading weights.
-    sq, sf = encode_batch([chess.Board()], [0])
-    net(tf.constant(sq), tf.constant(sf))
-    net.load_weights(model_path)
-    evaluator = TransformerEvaluator(net, use_fp16=True)
+    net.load_state_dict(torch.load(model_path, map_location="cpu"))
+    evaluator = TransformerEvaluator(net, use_fp16=True)  # moves net to MPS/CPU
     mcts = BatchedMCTS(evaluator, config, num_simulations=num_simulations)
 
     def _mover(board: chess.Board) -> Optional[chess.Move]:
@@ -83,8 +79,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="checkpoint/model_iter_5.weights.h5",
-        help="Path to model weights (.weights.h5). Ignored if --random-engine.",
+        default="checkpoints/distill/best.pt",
+        help="Path to PyTorch model weights (.pt). Ignored if --random-engine.",
     )
     parser.add_argument(
         "--random-engine",
@@ -126,6 +122,13 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Max puzzles to evaluate (default 200).",
+    )
+    parser.add_argument(
+        "--puzzle-format",
+        choices=["chessbench", "lichess"],
+        default="chessbench",
+        help="CSV layout: 'chessbench' (FEN is solver-to-move, Moves[0] is the answer) "
+             "or 'lichess' (FEN before opponent move, Moves[0] is opponent's).",
     )
     parser.add_argument(
         "--no-arena",
@@ -196,7 +199,9 @@ def main() -> int:
     else:
         print(f"\n=== Puzzle accuracy (max {args.max_puzzles}) ===")
         try:
-            puzzles = load_puzzles(path=args.puzzle_csv, max_puzzles=args.max_puzzles)
+            loader = (load_chessbench_puzzles if args.puzzle_format == "chessbench"
+                      else load_puzzles)
+            puzzles = loader(path=args.puzzle_csv, max_puzzles=args.max_puzzles)
             acc = puzzle_accuracy(engine=engine, puzzles=puzzles)
             print(f"  Puzzles loaded: {len(puzzles)}")
             print(f"  Top-1 accuracy: {acc:.3f} ({int(acc * len(puzzles))}/{len(puzzles)})")

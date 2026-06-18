@@ -95,6 +95,50 @@ def load_puzzles(
     return puzzles
 
 
+def load_chessbench_puzzles(
+    path: Optional[str] = None,
+    csv_text: Optional[str] = None,
+    max_puzzles: Optional[int] = None,
+) -> List[Puzzle]:
+    """Load DeepMind ChessBench puzzles.csv.
+
+    Columns: PuzzleId, Rating, PGN, Solution, FEN, Moves. Unlike Lichess, `FEN`
+    is already the position to solve (solver to move) and `Moves` is the UCI
+    solution line whose FIRST move is the solver's answer (no leading opponent
+    move). So the engine is evaluated on `FEN` directly and must play
+    `solution_moves[0]`.
+    """
+    if path is not None and csv_text is not None:
+        raise ValueError("Provide exactly one of path or csv_text, not both.")
+    if path is None and csv_text is None:
+        raise ValueError("Provide either path or csv_text.")
+    if path is not None:
+        with open(path, newline="", encoding="utf-8") as fh:
+            text = fh.read()
+    else:
+        text = csv_text  # type: ignore[assignment]
+
+    reader = csv.DictReader(io.StringIO(text))
+    puzzles: List[Puzzle] = []
+    for row in reader:
+        fen = row.get("FEN", "").strip()
+        moves_str = row.get("Moves", "").strip()
+        if not fen or not moves_str:
+            continue
+        try:
+            chess.Board(fen)  # validate
+            solution_moves = [chess.Move.from_uci(m) for m in moves_str.split()]
+        except (ValueError, chess.IllegalMoveError):
+            continue
+        if not solution_moves:
+            continue
+        puzzles.append(Puzzle(puzzle_id=row.get("PuzzleId", "").strip(),
+                              fen=fen, solution_moves=solution_moves))
+        if max_puzzles is not None and len(puzzles) >= max_puzzles:
+            break
+    return puzzles
+
+
 def puzzle_accuracy(
     engine: MoveProducer,
     puzzles: List[Puzzle],
