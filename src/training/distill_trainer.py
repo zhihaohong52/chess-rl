@@ -59,7 +59,13 @@ class DistillTrainer:
         self.net.train()
         self.opt.zero_grad()
         pol, wdl, ml = self.net(sq, sf)
-        loss, parts = total_loss(pol, wdl, ml, pol_t, wdl_t, ml_t)
+        loss, parts = total_loss(
+            pol, wdl, ml, pol_t, wdl_t, ml_t,
+            value_weight=getattr(self.cfg, "value_loss_weight", 1.0),
+            value_head_type=getattr(self.net, "value_head_type", "wdl"),
+            value_buckets=getattr(self.net, "value_buckets", 64),
+            value_sigma_frac=getattr(self.cfg, "value_sigma_frac", 0.75),
+        )
         loss.backward()
         nn.utils.clip_grad_norm_(self.net.parameters(), 1.0)
         self.opt.step()
@@ -146,9 +152,21 @@ class DistillTrainer:
                     break
                 (sq, sf), (pol_t, wdl_t, ml_t) = self._to_device(inputs, targets)
                 pol, wdl, ml = self.net(sq, sf)
-                _, parts = total_loss(pol, wdl, ml, pol_t, wdl_t, ml_t)
+                _, parts = total_loss(
+                    pol, wdl, ml, pol_t, wdl_t, ml_t,
+                    value_weight=getattr(self.cfg, "value_loss_weight", 1.0),
+                    value_head_type=getattr(self.net, "value_head_type", "wdl"),
+                    value_buckets=getattr(self.net, "value_buckets", 64),
+                    value_sigma_frac=getattr(self.cfg, "value_sigma_frac", 0.75),
+                )
                 ps += float(parts["policy"])
-                vs += value_sign_accuracy(wdl, wdl_t)
+                if getattr(self.net, "value_head_type", "wdl") == "hlgauss":
+                    from src.model.value_dist import expected_value
+                    vhat = expected_value(wdl)
+                    v_tgt = wdl_t[:, 0] + 0.5 * wdl_t[:, 1]
+                    vs += float(((vhat > 0.5) == (v_tgt > 0.5)).float().mean())
+                else:
+                    vs += value_sign_accuracy(wdl, wdl_t)
                 ts += top1_move_match(pol, pol_t)
                 n += 1
         n = max(n, 1)
