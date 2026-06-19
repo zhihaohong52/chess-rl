@@ -34,6 +34,20 @@ class BiasedMHA(nn.Module):
         return self.wo(o)
 
 
+class SwiGLUFFN(nn.Module):
+    """Gated FFN: down(silu(gate(x)) * up(x)). h ~ 2/3 d_ff to match MLP params."""
+
+    def __init__(self, d_model, d_ff):
+        super().__init__()
+        h = max(8, round(d_ff * 2 / 3 / 8) * 8)
+        self.gate = nn.Linear(d_model, h)
+        self.up = nn.Linear(d_model, h)
+        self.down = nn.Linear(h, d_model)
+
+    def forward(self, x):
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
 class EncoderLayer(nn.Module):
     def __init__(self, cfg, shared_smolgen_out):
         super().__init__()
@@ -42,9 +56,13 @@ class EncoderLayer(nn.Module):
         self.smolgen = Smolgen(cfg.d_model, cfg.n_heads, cfg.smolgen_compress,
                                cfg.smolgen_hidden, cfg.smolgen_gen, shared_smolgen_out)
         self.ln2 = nn.LayerNorm(cfg.d_model)
-        self.ffn = nn.Sequential(
-            nn.Linear(cfg.d_model, cfg.d_ff), nn.GELU(), nn.Linear(cfg.d_ff, cfg.d_model)
-        )
+        if getattr(cfg, "ffn_type", "mlp") == "swiglu":
+            self.ffn = SwiGLUFFN(cfg.d_model, cfg.d_ff)
+        else:
+            self.ffn = nn.Sequential(
+                nn.Linear(cfg.d_model, cfg.d_ff), nn.GELU(),
+                nn.Linear(cfg.d_ff, cfg.d_model),
+            )
 
     def forward(self, x):  # x: [B, 65, d] (index 0 = CLS, 1..64 = squares)
         h = self.ln1(x)
