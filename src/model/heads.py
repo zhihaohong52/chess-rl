@@ -60,6 +60,18 @@ class ValueHead(nn.Module):
         return self.d2(F.relu(self.d1(cls)))
 
 
+class DistributionalValueHead(nn.Module):
+    """CLS -> logits over `buckets` expected-score bins in [0,1] (HL-Gauss)."""
+
+    def __init__(self, d_model, buckets, hidden=128):
+        super().__init__()
+        self.d1 = nn.Linear(d_model, hidden)
+        self.d2 = nn.Linear(hidden, buckets)
+
+    def forward(self, cls):
+        return self.d2(F.relu(self.d1(cls)))
+
+
 class MovesLeftHead(nn.Module):
     def __init__(self, d_model, hidden=128):
         super().__init__()
