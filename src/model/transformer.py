@@ -63,13 +63,14 @@ class EncoderLayer(nn.Module):
                 nn.Linear(cfg.d_model, cfg.d_ff), nn.GELU(),
                 nn.Linear(cfg.d_ff, cfg.d_model),
             )
+        self.drop = nn.Dropout(getattr(cfg, "transformer_dropout", 0.0))
 
     def forward(self, x):  # x: [B, 65, d] (index 0 = CLS, 1..64 = squares)
         h = self.ln1(x)
         bias64 = self.smolgen(h[:, 1:, :])             # [B,h,64,64]
         bias = F.pad(bias64, (1, 0, 1, 0))             # CLS row/col = 0 -> [B,h,65,65]
-        x = x + self.attn(h, bias)
-        x = x + self.ffn(self.ln2(x))
+        x = x + self.drop(self.attn(h, bias))
+        x = x + self.drop(self.ffn(self.ln2(x)))
         return x
 
 
