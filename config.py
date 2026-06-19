@@ -91,6 +91,14 @@ class Config:
     state_dim = 18
     transformer_dropout = 0.0
 
+    # Phase 2 value head / recipe knobs (defaults preserve baseline-v1)
+    value_head_type = "wdl"      # "wdl" | "hlgauss"
+    value_buckets = 64
+    value_sigma_frac = 0.75      # HL-Gauss sigma as fraction of a bucket width
+    value_loss_weight = 1.0
+    ffn_type = "mlp"             # "mlp" | "swiglu"
+    ema_decay = 0.0              # 0 = off
+
     # Distillation training (Phase 1)
     distill_batch_size = 1024
     distill_lr = 3e-4
