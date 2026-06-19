@@ -124,6 +124,41 @@ def _build_position(fen, moves, wins, temperature):
                            moves_left=_DEFAULT_MOVES_LEFT)
 
 
+def iter_hf_dense(paths, temperature: float = 0.1, max_positions=None):
+    """Yield dense LabeledPositions from prdev/chessbench-full-policy-value shards.
+
+    Each shard is a zstd-compressed stream of msgpack records:
+        {"fen": str, "moves": {uci: {"win_prob": float in [0,1], "mate": ...}}}
+    `win_prob` is from the side-to-move perspective (a forced mate by the mover is
+    1.0), matching our canonical orientation and the ChessBench action_value
+    semantics. We build a dense policy = softmax(win/temperature) over ALL provided
+    legal moves and value/WDL from the best move's win%. Use a sharp temperature
+    (default 0.1) so decisive best moves dominate the target.
+    """
+    import zstandard  # lazy: only this reader needs them
+    import msgpack
+
+    if isinstance(paths, str):
+        paths = [paths]
+    dctx = zstandard.ZstdDecompressor()
+    emitted = 0
+    for path in paths:
+        with open(path, "rb") as fh:
+            reader = dctx.stream_reader(fh)
+            unpacker = msgpack.Unpacker(reader, raw=False)
+            for rec in unpacker:
+                mvs = rec.get("moves")
+                if not mvs:
+                    continue
+                moves = list(mvs.keys())
+                wins = [(v["win_prob"] if isinstance(v, dict) else float(v))
+                        for v in mvs.values()]
+                yield _build_position(rec["fen"], moves, wins, temperature)
+                emitted += 1
+                if max_positions is not None and emitted >= max_positions:
+                    return
+
+
 def iter_chessbench_actionvalue(paths, max_positions=None):
     """Yield raw (fen, uci_move, win_prob) action-value samples — NO grouping.
 

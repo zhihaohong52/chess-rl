@@ -13,14 +13,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.data.chessbench import iter_kaggle_csv, iter_chessbench
+from src.data.chessbench import iter_kaggle_csv, iter_chessbench, iter_hf_dense
 from src.data.preencode import write_shard
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", choices=["kaggle", "chessbench"], required=True)
+    ap.add_argument("--source", choices=["kaggle", "chessbench", "hf_dense"], required=True)
     ap.add_argument("--input", required=True)
+    ap.add_argument("--temperature", type=float, default=0.1,
+                    help="policy softmax temperature for chessbench/hf_dense sources")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--shard-size", type=int, default=100000)
     ap.add_argument("--max-positions", type=int, default=0,
@@ -30,7 +32,12 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    src = iter_kaggle_csv(args.input) if args.source == "kaggle" else iter_chessbench(args.input)
+    if args.source == "kaggle":
+        src = iter_kaggle_csv(args.input)
+    elif args.source == "hf_dense":
+        src = iter_hf_dense(args.input, temperature=args.temperature)
+    else:
+        src = iter_chessbench(args.input, temperature=args.temperature)
     if args.max_positions:
         src = itertools.islice(src, args.max_positions)
 
