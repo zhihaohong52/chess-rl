@@ -33,3 +33,22 @@ def test_gates_policy_value_metrics_hlgauss_smoke():
     loader = make_dataloader([path], batch_size=64, policy_size=P, shuffle=False)
     m = policy_value_metrics(net, "cpu", loader, max_batches=1)
     assert "value_sign_acc" in m and 0.0 <= m["value_sign_acc"] <= 1.0
+
+
+def test_evaluator_hlgauss_value_matches_expected_value():
+    import torch
+    from src.model.value_dist import expected_value
+    net = _hlgauss_net()
+    ev = TransformerEvaluator(net, device="cpu", objective="policy")
+    board = chess.Board()
+    # raw value logits from the net
+    from src.game.token_encoder import encode_position
+    sq, sf = encode_position(board, 0)
+    sq_t = torch.tensor(sq[None], dtype=torch.long)
+    sf_t = torch.tensor(sf[None], dtype=torch.float32)
+    with torch.no_grad():
+        _, val_logits, _ = net.predict_batch(sq_t, sf_t)
+    vhat = float(expected_value(val_logits)[0])
+    expected = 2.0 * vhat - 1.0
+    _, value = ev.evaluate(board)
+    assert abs(value - expected) < 1e-4, f"{value} != {expected} (double-softmax?)"

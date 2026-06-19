@@ -44,11 +44,9 @@ class TransformerEvaluator:
             if not legal:
                 if getattr(self.net, "value_head_type", "wdl") == "hlgauss":
                     from src.model.value_dist import bucket_centers
-                    import numpy as _np
-                    logits_v = wdl[i]                       # [K]
-                    p = _np.exp(logits_v - logits_v.max()); p = p / p.sum()
-                    centers = bucket_centers(len(p)).numpy()
-                    vhat = float((p * centers).sum())
+                    probs_v = wdl[i]                        # already softmax over K buckets
+                    centers = bucket_centers(len(probs_v)).numpy()
+                    vhat = float((probs_v * centers).sum())
                     _no_legal_value = 2.0 * vhat - 1.0
                 else:
                     _no_legal_value = float(wdl[i, 0] - wdl[i, 2])
@@ -69,11 +67,9 @@ class TransformerEvaluator:
                 policy = {mv: float(p) for mv, p in zip(legal, probs)}
                 if getattr(self.net, "value_head_type", "wdl") == "hlgauss":
                     from src.model.value_dist import bucket_centers
-                    import numpy as _np
-                    logits_v = wdl[i]                       # [K]
-                    p = _np.exp(logits_v - logits_v.max()); p = p / p.sum()
-                    centers = bucket_centers(len(p)).numpy()
-                    vhat = float((p * centers).sum())
+                    probs_v = wdl[i]                        # already softmax over K buckets
+                    centers = bucket_centers(len(probs_v)).numpy()
+                    vhat = float((probs_v * centers).sum())
                     value = 2.0 * vhat - 1.0
                 else:
                     value = float(wdl[i, 0] - wdl[i, 2])  # P(W) - P(L)
