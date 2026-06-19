@@ -33,8 +33,12 @@ def total_loss(policy_logits, value_out, moves_left_pred,
     p = policy_loss(policy_logits, policy_target)
     if value_head_type == "hlgauss":
         v = value_loss_hlgauss(value_out, wdl_target, value_buckets, value_sigma_frac)
-    else:
+    elif value_head_type == "wdl":
         v = value_loss(value_out, wdl_target)
+    else:
+        raise ValueError(
+            f"Unknown value_head_type: {value_head_type!r}; expected 'wdl' or 'hlgauss'"
+        )
     m = moves_left_loss(moves_left_pred, moves_left_target)
     total = p + value_weight * v + moves_left_weight * m
     return total, {"policy": p, "value": v, "moves_left": m}

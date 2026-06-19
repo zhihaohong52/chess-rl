@@ -17,6 +17,7 @@ def test_total_loss_wdl_default():
     loss, parts = total_loss(pol, wdl, ml, pol_t, wdl_t, ml_t)
     assert set(parts) == {"policy", "value", "moves_left"}
     assert torch.isfinite(loss)
+    assert torch.isfinite(parts["value"])
 
 
 def test_total_loss_hlgauss_branch():
@@ -27,3 +28,10 @@ def test_total_loss_hlgauss_branch():
                              value_head_type="hlgauss", value_buckets=K,
                              value_sigma_frac=0.75)
     assert torch.isfinite(loss) and torch.isfinite(parts["value"])
+
+
+def test_total_loss_unknown_head_raises():
+    import pytest
+    P, pol, pol_t, ml, ml_t, wdl_t = _common()
+    with pytest.raises(ValueError):
+        total_loss(pol, torch.randn(2, 3), ml, pol_t, wdl_t, ml_t, value_head_type="bogus")
