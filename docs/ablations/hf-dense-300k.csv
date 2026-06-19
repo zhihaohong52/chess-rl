@@ -1,0 +1,2 @@
+preset,params,raw_top1@300,raw_top1@1000,mcts100_top1@300,mate_in_1,top1,top3,top5,policy_ce,legal_mass,wdl_ce,value_sign_acc,draw_cal,batch_latency_ms,positions_per_sec
+baseline-v1,10255879,0.3233,0.3590,0.3100,0.6667,0.3307,0.5902,0.7046,3.1525,0.9937,0.4379,0.8472,0.0072,143.3804,1785.4604
