@@ -28,3 +28,15 @@ def test_ema_saves_ema_checkpoint(tmp_path):
                 meta={"preset": "baseline-v1", "train_data": "unit"})
     assert os.path.exists(os.path.join(ckpt, "best_ema.pt"))
     assert read_sidecar(os.path.join(ckpt, "best_ema.pt"))["objective"] == "policy"
+
+
+def test_no_ema_by_default(tmp_path):
+    cfg = resolve_config("baseline-v1")  # ema_decay defaults to 0.0
+    net = ChessTransformer(cfg)
+    trainer = DistillTrainer(net, cfg, device="cpu")
+    assert trainer._ema is None
+    loader = [_batch()]
+    ckpt = str(tmp_path / "ck")
+    trainer.fit(loader, steps=1, val_loader=loader, val_every=1, ckpt_dir=ckpt,
+                meta={"preset": "baseline-v1", "train_data": "unit"})
+    assert not os.path.exists(os.path.join(ckpt, "best_ema.pt"))

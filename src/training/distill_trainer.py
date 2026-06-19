@@ -162,12 +162,14 @@ class DistillTrainer:
     def _save_ema(self, ckpt_dir, name, objective, meta, val_loader):
         live = {k: v.detach().clone() for k, v in self.net.state_dict().items()}
         self.net.load_state_dict(self._ema)
-        ema_metrics = self.evaluate(val_loader)
-        best = getattr(self, "_ema_best", float("inf"))
-        if ema_metrics["val_policy_loss"] < best:
-            self._ema_best = ema_metrics["val_policy_loss"]
-            self._save_ckpt(ckpt_dir, name, objective, meta)
-        self.net.load_state_dict(live)
+        try:
+            ema_metrics = self.evaluate(val_loader)
+            best = getattr(self, "_ema_best", float("inf"))
+            if ema_metrics["val_policy_loss"] < best:
+                self._ema_best = ema_metrics["val_policy_loss"]
+                self._save_ckpt(ckpt_dir, name, objective, meta)
+        finally:
+            self.net.load_state_dict(live)
 
     def evaluate(self, val_loader, max_batches: int = 50):
         self.net.eval()
