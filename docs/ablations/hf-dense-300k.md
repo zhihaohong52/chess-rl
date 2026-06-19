@@ -42,3 +42,26 @@ calibration used in PUCT backup. Track MCTS-vs-raw at each scale-up step.
 model / longer training on the rented GPU, while monitoring that MCTS regains its
 edge over raw as the value head strengthens.
 
+## MCTS diagnosis (2026-06-19)
+
+Swept c_puct × simulations on this model (200 puzzles, raw=0.340 on the subset):
+
+| c_puct \ sims | 25 | 50 | 100 | 200 |
+| --- | --- | --- | --- | --- |
+| 1.5 | 0.315 | 0.320 | 0.335 | 0.310 |
+| 3.0 | 0.335 | 0.320 | 0.310 | 0.300 |
+| 6.0 | 0.350 | 0.340 | 0.310 | 0.305 |
+
+Findings: (1) **more simulations → monotonically worse** at every c_puct — the
+textbook signature of a value function that misleads tree backup; (2) the best
+configs are those that *minimize* search influence (high c_puct, few sims, staying
+on the prior), and even the best only ties raw within noise. Dirichlet root noise
+is already OFF for eval (`add_noise=False`), so it is not the cause.
+
+**Conclusion: the value head — not an MCTS hyperparameter — is the bottleneck.**
+The policy is strong (raw 0.34–0.36); the value head (sign-acc 0.847) is not yet
+good enough for search to add value. Fix = a stronger value head via the bigger
+model + longer training on the GPU (and possibly more value loss weight / better
+value calibration), NOT search tuning. Near-term, raw policy is the stronger engine
+than MCTS at this model scale. Track MCTS-vs-raw as the value head strengthens.
+
