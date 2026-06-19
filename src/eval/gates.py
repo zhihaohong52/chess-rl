@@ -94,9 +94,20 @@ def policy_value_metrics(net, device, val_loader, max_batches: int = 50) -> dict
             acc["top5"] += mc.policy_topk_match(pol, pol_t, 5)
             acc["policy_ce"] += mc.policy_cross_entropy(pol, pol_t)
             acc["legal_mass"] += mc.legal_mass(pol, pol_t)
-            acc["wdl_ce"] += mc.wdl_cross_entropy(wdl, wdl_t)
-            acc["value_sign_acc"] += mc.value_sign_acc(wdl, wdl_t)
-            acc["draw_cal"] += mc.draw_calibration(wdl, wdl_t)
+            if getattr(net, "value_head_type", "wdl") == "hlgauss":
+                from src.model.value_dist import expected_value, hl_gauss_target
+                import torch.nn.functional as _F
+                v_tgt = wdl_t[:, 0] + 0.5 * wdl_t[:, 1]
+                vhat = expected_value(wdl)
+                tgt = hl_gauss_target(v_tgt, wdl.shape[-1],
+                                      getattr(net.cfg, "value_sigma_frac", 0.75))
+                acc["wdl_ce"] += float(-(tgt * _F.log_softmax(wdl, dim=-1)).sum(-1).mean())
+                acc["value_sign_acc"] += float(((vhat > 0.5) == (v_tgt > 0.5)).float().mean())
+                acc["draw_cal"] += float((vhat - v_tgt).abs().mean())
+            else:
+                acc["wdl_ce"] += mc.wdl_cross_entropy(wdl, wdl_t)
+                acc["value_sign_acc"] += mc.value_sign_acc(wdl, wdl_t)
+                acc["draw_cal"] += mc.draw_calibration(wdl, wdl_t)
             n += 1
     n = max(n, 1)
     return {k: v / n for k, v in acc.items()}

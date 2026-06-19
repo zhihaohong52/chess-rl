@@ -42,7 +42,17 @@ class TransformerEvaluator:
         for i, b in enumerate(boards):
             legal = list(b.legal_moves)
             if not legal:
-                out.append(({}, float(wdl[i, 0] - wdl[i, 2])))
+                if getattr(self.net, "value_head_type", "wdl") == "hlgauss":
+                    from src.model.value_dist import bucket_centers
+                    import numpy as _np
+                    logits_v = wdl[i]                       # [K]
+                    p = _np.exp(logits_v - logits_v.max()); p = p / p.sum()
+                    centers = bucket_centers(len(p)).numpy()
+                    vhat = float((p * centers).sum())
+                    _no_legal_value = 2.0 * vhat - 1.0
+                else:
+                    _no_legal_value = float(wdl[i, 0] - wdl[i, 2])
+                out.append(({}, _no_legal_value))
                 continue
             idxs = [self.me.encode(to_canonical_move(mv, b.turn)) for mv in legal]
             logits = pol_logits[i][idxs]
@@ -57,6 +67,15 @@ class TransformerEvaluator:
                 probs = np.exp(logits)
                 probs = probs / probs.sum()
                 policy = {mv: float(p) for mv, p in zip(legal, probs)}
-                value = float(wdl[i, 0] - wdl[i, 2])  # P(W) - P(L), side-to-move POV
+                if getattr(self.net, "value_head_type", "wdl") == "hlgauss":
+                    from src.model.value_dist import bucket_centers
+                    import numpy as _np
+                    logits_v = wdl[i]                       # [K]
+                    p = _np.exp(logits_v - logits_v.max()); p = p / p.sum()
+                    centers = bucket_centers(len(p)).numpy()
+                    vhat = float((p * centers).sum())
+                    value = 2.0 * vhat - 1.0
+                else:
+                    value = float(wdl[i, 0] - wdl[i, 2])  # P(W) - P(L)
             out.append((policy, value))
         return out
