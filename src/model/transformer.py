@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.model.smolgen import Smolgen
-from src.model.heads import PolicyHead, ValueHead, MovesLeftHead
+from src.model.heads import PolicyHead, ValueHead, MovesLeftHead, DistributionalValueHead
 
 
 class BiasedMHA(nn.Module):
@@ -72,13 +72,18 @@ class ChessTransformer(nn.Module):
         )
         self.final_ln = nn.LayerNorm(d)
         self.policy_head = PolicyHead(d)
-        self.value_head = ValueHead(d)
+        self.value_head_type = getattr(cfg, "value_head_type", "wdl")
+        self.value_buckets = getattr(cfg, "value_buckets", 64)
+        if self.value_head_type == "hlgauss":
+            self.value_head = DistributionalValueHead(d, self.value_buckets)
+        else:
+            self.value_head = ValueHead(d)
         self.moves_left_head = MovesLeftHead(d)
 
     def forward(self, square_tokens, state_features):
         """square_tokens: [B,64] long; state_features: [B,18] float.
 
-        Returns (policy_logits[B,P], wdl_logits[B,3], moves_left[B,1]).
+        Returns (policy_logits[B,P], value_out[B,3]|[B,K], moves_left[B,1]).
         """
         pe = self.piece_emb(square_tokens) + self.pos_emb       # [B,64,d]
         cond = self.state_mlp(state_features).unsqueeze(1)      # [B,1,d]
