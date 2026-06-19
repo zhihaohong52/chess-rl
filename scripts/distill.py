@@ -35,6 +35,7 @@ def main():
     ap.add_argument("--ckpt", default="checkpoints/distill")
     ap.add_argument("--val-every", type=int, default=1000)
     ap.add_argument("--mixed-precision", action="store_true")
+    ap.add_argument("--ema-decay", type=float, default=0.0)
     args = ap.parse_args()
 
     # Resolve the model preset and align the LR schedule with this run's length.
@@ -42,6 +43,7 @@ def main():
     cfg.distill_lr = args.lr
     cfg.distill_warmup_steps = args.warmup
     cfg.distill_total_steps = args.steps
+    cfg.ema_decay = args.ema_decay
 
     P = get_move_encoder().policy_size
     train_loader = make_dataloader(

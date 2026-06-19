@@ -44,6 +44,11 @@ class DistillTrainer:
             total_steps=cfg.distill_total_steps,
         )
 
+        self.ema_decay = getattr(cfg, "ema_decay", 0.0)
+        self._ema = None
+        if self.ema_decay > 0:
+            self._ema = {k: v.detach().clone() for k, v in self.net.state_dict().items()}
+
     def _to_device(self, inputs, targets):
         sq, sf = inputs
         pol_t, wdl_t, ml_t = targets
@@ -53,6 +58,16 @@ class DistillTrainer:
         wdl_t = wdl_t.to(self.device)
         ml_t = ml_t.to(self.device)
         return (sq, sf), (pol_t, wdl_t, ml_t)
+
+    def _update_ema(self):
+        if self._ema is None:
+            return
+        d = self.ema_decay
+        for k, v in self.net.state_dict().items():
+            if v.dtype.is_floating_point:
+                self._ema[k].mul_(d).add_(v.detach(), alpha=1 - d)
+            else:
+                self._ema[k].copy_(v)
 
     def train_step(self, inputs, targets):
         (sq, sf), (pol_t, wdl_t, ml_t) = self._to_device(inputs, targets)
@@ -69,6 +84,7 @@ class DistillTrainer:
         loss.backward()
         nn.utils.clip_grad_norm_(self.net.parameters(), 1.0)
         self.opt.step()
+        self._update_ema()
         self.scheduler.step()
         return float(loss.detach()), {k: float(v.detach()) for k, v in parts.items()}
 
@@ -143,6 +159,16 @@ class DistillTrainer:
             full["objective"] = objective
             write_sidecar(path, full)
 
+    def _save_ema(self, ckpt_dir, name, objective, meta, val_loader):
+        live = {k: v.detach().clone() for k, v in self.net.state_dict().items()}
+        self.net.load_state_dict(self._ema)
+        ema_metrics = self.evaluate(val_loader)
+        best = getattr(self, "_ema_best", float("inf"))
+        if ema_metrics["val_policy_loss"] < best:
+            self._ema_best = ema_metrics["val_policy_loss"]
+            self._save_ckpt(ckpt_dir, name, objective, meta)
+        self.net.load_state_dict(live)
+
     def evaluate(self, val_loader, max_batches: int = 50):
         self.net.eval()
         ps, vs, ts, n = 0.0, 0.0, 0.0, 0
@@ -194,5 +220,7 @@ class DistillTrainer:
                 if metrics["val_policy_loss"] < best:
                     best = metrics["val_policy_loss"]
                     self._save_ckpt(ckpt_dir, "best.pt", "policy", meta)
+                if self._ema is not None:
+                    self._save_ema(ckpt_dir, "best_ema.pt", "policy", meta, val_loader)
         self._save_ckpt(ckpt_dir, "last.pt", "policy", meta)
         return best
