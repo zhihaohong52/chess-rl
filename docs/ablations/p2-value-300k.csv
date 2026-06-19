@@ -1,0 +1,2 @@
+preset,params,raw_top1@300,raw_top1@1000,mcts100_top1@300,mate_in_1,top1,top3,top5,policy_ce,legal_mass,wdl_ce,value_sign_acc,draw_cal,batch_latency_ms,positions_per_sec
+p2-value,10263748,0.3867,0.3750,0.2967,0.6667,0.3068,0.5506,0.6659,3.2019,0.9784,2.0057,0.8609,0.0300,142.7209,1793.7102
