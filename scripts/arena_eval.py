@@ -42,6 +42,10 @@ def build_mcts_mover(evaluator, simulations):
 
 
 def run_head_to_head(model, vs, games, simulations, device, max_moves):
+    if games % 2 != 0:
+        print(f"warning: --games {games} is odd; color split is uneven and the "
+              f"score carries a small first-mover bias. Use an even count.",
+              file=sys.stderr, flush=True)
     net_a, ev_a = load_for_eval(model, device=device)
     net_b, ev_b = load_for_eval(vs, device=device)
     mover_a = build_mcts_mover(ev_a, simulations)
@@ -102,4 +106,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
