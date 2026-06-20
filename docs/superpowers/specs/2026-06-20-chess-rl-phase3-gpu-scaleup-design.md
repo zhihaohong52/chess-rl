@@ -33,19 +33,21 @@ because puzzle top-1 is known (Phase 2) to misjudge engine strength.
 | GPU | **RTX A6000** ($0.35/hr, ~28 h in budget) | 77M needs <10% of 48 GB VRAM; A100/H100 advantages (VRAM, bandwidth) are unusable at our scale; A6000 gives the most hours + debug slack |
 | Model | **`p3-80m`** = d_model 512, n_layers 16, n_heads 16, d_ff 3072 (SwiGLU) → **77.0M** | Within Codex's recommended shape (d_model ≤512, 12–16 layers); head_dim 32; param count verified with the harness |
 | Recipe | `phase2-best`: HL-Gauss value (64 buckets) + SwiGLU + dropout 0.05 + EMA 0.999 | The validated Phase-2 stack |
-| Data | **~50M dense positions** @ T=0.1, one pass, encoded **on the box** (scalable to 100M) | 294k (Phase 2) and even 10M starve a 77M model; one pass over 50M *unique* positions beats multi-epoch over a small set (Codex: more unique data > more passes); encoding is now fast + parallel |
-| Core gate | **model-vs-model head-to-head** (77M vs 10M `phase2-best`) at equal MCTS sims | Codex's success criterion; the gate we currently lack |
+| Data | **~100M dense positions** @ T=0.1, one pass, encoded **on the box** | 294k (Phase 2) and even 10M starve a 77M model; one pass over 100M *unique* positions beats multi-epoch over a small set (Codex: more unique data > more passes); encoding is now fast + parallel |
+| Control | **10M `p2-value-swiglu-drop` retrained on the same 100M** | Isolates *scale* from *data* — the clean Codex experiment; cheap on the GPU |
+| Core gate | **model-vs-model head-to-head** (77M vs the 10M control) at equal MCTS sims | Codex's success criterion; the gate we currently lack |
 | Out of scope | self-play loop | The only path that truly surpasses the teacher, but too big for $10 + M1 — a future phase |
 
 ## Honest expectations (data is the binding constraint)
 
 A 77M model is still a **strong imitator**, bounded by Stockfish/label quality
-(DeepMind used ~15B positions for 270M). ~50M unique positions substantially
-reduces the starvation risk vs 10M, but a win over the 10M `phase2-best` is not
-guaranteed. Mitigations: one-pass training, dropout 0.05, EMA, early-stop on val
-loss, and — if val shows underfit — **scale to 100M** (cheap now). A
-null/negative head-to-head result is itself a valid finding for the program (it
-bounds the distillation ceiling at our budget) rather than a failure.
+(DeepMind used ~15B positions for 270M). ~100M unique positions strongly feeds
+the 77M and gives the scale hypothesis a fair test, but a win over the 10M
+control is not guaranteed. Mitigations: one-pass training, dropout 0.05, EMA,
+early-stop on val loss. Because the 10M control trains on the **same** 100M, a
+null/negative head-to-head is a clean, valid finding — it means *scale didn't
+help at this data/compute*, which bounds the distillation ceiling rather than
+being a failure.
 
 ## Components to build (local, TDD'd, before renting)
 
@@ -89,73 +91,83 @@ the box (fast network). Test: URL pattern is well-formed (no network test).
 
 ## Data plan
 
-On the box: download ~15 raw shards (~3.5M positions each, ~72 MB → ~1.1 GB) into
+On the box: download ~29 raw shards (~3.5M positions each, ~72 MB → ~2.1 GB) into
 `data/raw_hf/`, then `scripts/preencode.py --source hf_dense --input
 'data/raw_hf/train-*.msgpack.zst' --workers <vCPUs> --temperature 0.1
---val-fraction 0.004 --shard-size 250000 --out-dir data/shards_p3_50m`
-(uncompressed default). Encoding ~50M is ~17 min in parallel; ~21 GB on disk
-(ensure the instance disk ≥ 60 GB). Result: ~49.8M train + ~0.2M val.
-Scaling to 100M = download ~29 shards (~43 GB, ~35 min encode) — no code change.
+--val-fraction 0.002 --shard-size 250000 --out-dir data/shards_p3_100m`
+(uncompressed default). Encoding ~100M is ~35 min in parallel; ~43 GB on disk
+(ensure the instance disk ≥ 100 GB). Result: ~99.8M train + ~0.2M val. Both the
+77M run and the 10M control train on this same set.
 
 ## Training recipe
 
-`scripts/distill.py --preset p3-80m --device cuda --mixed-precision
---train 'data/shards_p3_50m/train_*.npz' --val 'data/shards_p3_50m/val_*.npz'
---batch 1024 --steps ~49000 --warmup 2000 --lr 2e-4 --ema-decay 0.999
+**77M run:** `scripts/distill.py --preset p3-80m --device cuda --mixed-precision
+--train 'data/shards_p3_100m/train_*.npz' --val 'data/shards_p3_100m/val_*.npz'
+--batch 1024 --steps ~98000 --warmup 2000 --lr 2e-4 --ema-decay 0.999
 --val-every 2000 --ckpt checkpoints/p3_80m`.
 - Batch 1024 (VRAM allows far more; tune up if throughput-bound).
 - LR 2e-4 (lower than the 10M's 3e-4 for the bigger model); cosine via existing
   scheduler; warmup 2000.
-- ~1 pass over 50M (~48.8k steps at batch 1024). Gauge throughput with a 500-step
-  smoke run first and resize `--steps`; extend toward a 2nd pass only if val is
-  still improving at the end of pass 1.
+- ~1 pass over 100M (~97.7k steps at batch 1024). Gauge throughput with a
+  500-step smoke run first and resize `--steps` to the budget.
 - EMA → `best_ema.pt` is the evaluation checkpoint.
+
+**10M control:** same command with `--preset p2-value-swiglu-drop --lr 3e-4
+--ckpt checkpoints/p3_10m_ctrl` on the **same** `data/shards_p3_100m`. Trains
+~8× faster per step than the 77M, so it's a small fraction of the budget. Take
+its `best_ema.pt` for the head-to-head.
 
 ## Evaluation plan
 
 1. **Standard gates** — `scripts/ablate.py` on `p3_80m/best_ema.pt`: raw top-1,
    value calibration (MAE/sign-acc), mate-in-1, throughput.
-2. **Core gate (head-to-head)** — `arena_eval.py --vs checkpoints/p2_full_300k/best_ema.pt`
-   at equal sims (e.g. 100), ≥100 color-balanced games. **Success: 77M scores
-   >0.5 beyond ~1.5 std-err.**
-3. **Elo ladder** — wider Stockfish arena (skills 1–10, depth ≥4, ≥40 games/skill)
+2. **Core gate (head-to-head, scale isolation)** —
+   `arena_eval.py --vs checkpoints/p3_10m_ctrl/best_ema.pt` at equal sims
+   (e.g. 100), ≥100 color-balanced games. Both models trained on the same 100M,
+   so this isolates scale. **Success: 77M scores >0.5 beyond ~1.5 std-err.**
+3. **Champion check (secondary head-to-head)** — 77M vs the prior champion
+   `checkpoints/p2_full_300k/best_ema.pt` (10M `phase2-best`, trained on 294k),
+   same settings — "did we beat the old best?" (confounded by data, hence
+   secondary).
+4. **Elo ladder** — wider Stockfish arena (skills 1–10, depth ≥4, ≥40 games/skill)
    on the stronger model for a firmer absolute Elo.
-4. Record all in `docs/ablations/p3-80m.md` with a Decision section.
-
-### Optional (recommended if budget allows): 10M control
-Retrain `p2-value-swiglu-drop` (10M) on the **same** ~10M data, then head-to-head
-77M vs that control — isolates *scale* from *data*. Cheap (the 10M trains fast on
-the GPU). Cut from scope if budget is tight.
+5. Record all in `docs/ablations/p3-80m.md` with a Decision section.
 
 ## Remote runbook (cost discipline)
 
 Provision only when local code + a smoke plan are ready. Per-minute billing;
 **stop the instance whenever idle**.
 
-1. `tnr create` (A6000, disk ≥ 60 GB for ~50M shards) → `tnr status` → `tnr connect <id>`.
+1. `tnr create` (A6000, disk ≥ 100 GB for ~100M shards) → `tnr status` → `tnr connect <id>`.
 2. On the box: clone branch, create venv, `pip install -r requirements.txt`
    (+ torch CUDA build), install Stockfish for arena.
 3. `tnr scp` the repo or `git pull`; download raw shards on the box.
 4. Parallel-encode → smoke train (500 steps) to gauge throughput/VRAM → size
-   `--steps` → full train → eval.
+   `--steps` → full 77M train → 10M control train → eval (head-to-heads + ladder).
 5. `tnr scp` checkpoints + ablation md back to local.
 6. `tnr delete <id>`.
 
 ## Success criteria
 
 - `p3-80m` builds at 77.0M; `baseline-v1` stays bit-identical (param lock green).
-- Training completes within budget; `best_ema.pt` + routable sidecar produced.
-- Head-to-head 77M vs 10M `phase2-best` reported over ≥100 games (win OR a clear
-  null — both are valid findings).
-- Firm Elo ladder for the winner; results + decision in `docs/ablations/p3-80m.md`.
-- Total spend < $10 (target ~$2–5 of GPU time: ~$0.2 encode + ~$1–2 train +
-  ~$1–2 head-to-head/ladder eval, with buffer for the smoke run and debugging).
+- Both trains (77M + 10M control on the same 100M) complete within budget;
+  `best_ema.pt` + routable sidecars produced.
+- **Primary:** head-to-head 77M vs 10M control over ≥100 games (win OR a clear
+  null — both valid scale findings). **Secondary:** 77M vs prior champion
+  `p2_full_300k`.
+- Firm Elo ladder for the stronger model; results + decision in
+  `docs/ablations/p3-80m.md`.
+- Total spend < $10 (target ~$3–6 of GPU time: ~$0.3 encode + ~$1–2 (77M) +
+  ~$0.3 (10M control) + ~$1–2 head-to-heads/ladder, with buffer for the smoke
+  run and debugging).
 
 ## Risks
 
-- **Data-starvation / overfit at 77M** — reduced at 50M but not eliminated;
-  mitigate with one-pass training, dropout/EMA/early-stop, and scale to 100M if
-  val underfits.
+- **Data-starvation / overfit at 77M** — largely addressed at 100M; one-pass
+  training + dropout/EMA/early-stop. If val still underfits, the data lever
+  (more shards) is available.
+- **Encode/disk at 100M** — ~43 GB encoded; provision disk ≥ 100 GB and confirm
+  free space before encoding.
 - **First CUDA run** — new device + AMP path; de-risk with the 500-step smoke run
   before committing budget.
 - **Throughput unknown** — measure before sizing `--steps`; A6000 + bf16 + seq-65
