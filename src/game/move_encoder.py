@@ -134,6 +134,18 @@ class MoveEncoder:
 
         self.num_moves = idx
 
+        # Fast-path lookup keyed by (from_square, to_square, promotion) so the
+        # hot encoding loop can avoid constructing chess.Move objects.
+        self._triple_to_idx = {
+            (m.from_square, m.to_square, m.promotion): i
+            for m, i in self.move_to_idx.items()
+        }
+
+    # UCI promotion char -> piece type (queen handled as a plain move, below).
+    _PROMO_CHAR = {
+        "q": chess.QUEEN, "r": chess.ROOK, "b": chess.BISHOP, "n": chess.KNIGHT,
+    }
+
     @property
     def policy_size(self) -> int:
         """Return the total number of possible moves."""
@@ -155,6 +167,28 @@ class MoveEncoder:
         if move.promotion == chess.QUEEN:
             move = chess.Move(move.from_square, move.to_square)
         return self.move_to_idx[move]
+
+    def encode_uci_canonical(self, uci: str, turn: bool) -> int:
+        """Encode a UCI move string directly to its canonical policy index.
+
+        Equivalent to ``encode(to_canonical_move(Move.from_uci(uci), turn))`` but
+        parses the UCI string arithmetically and uses a precomputed table,
+        avoiding python-chess ``Move.from_uci`` (whose internal linear
+        ``SQUARE_NAMES.index`` scans dominate bulk-encoding cost). The canonical
+        frame mirrors squares vertically (``sq ^ 56``) when Black is to move.
+
+        Raises:
+            KeyError: if the move is not in the encoding.
+        """
+        from_sq = (ord(uci[0]) - 97) + (ord(uci[1]) - 49) * 8
+        to_sq = (ord(uci[2]) - 97) + (ord(uci[3]) - 49) * 8
+        promo = self._PROMO_CHAR[uci[4]] if len(uci) == 5 else None
+        if turn != chess.WHITE:  # mirror into the side-to-move (canonical) frame
+            from_sq ^= 56
+            to_sq ^= 56
+        if promo == chess.QUEEN:  # queen promotion is the plain (from,to) move
+            promo = None
+        return self._triple_to_idx[(from_sq, to_sq, promo)]
 
     def decode(self, idx: int) -> chess.Move:
         """Decode an index to a chess move.
