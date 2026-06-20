@@ -1,5 +1,6 @@
 """Supervised distillation trainer for ChessTransformer (PyTorch)."""
 
+import contextlib
 import math
 import os
 
@@ -82,14 +83,20 @@ class DistillTrainer:
         (sq, sf), (pol_t, wdl_t, ml_t) = self._to_device(inputs, targets)
         self.net.train()
         self.opt.zero_grad()
-        pol, wdl, ml = self.net(sq, sf)
-        loss, parts = total_loss(
-            pol, wdl, ml, pol_t, wdl_t, ml_t,
-            value_weight=getattr(self.cfg, "value_loss_weight", 1.0),
-            value_head_type=getattr(self.net, "value_head_type", "wdl"),
-            value_buckets=getattr(self.net, "value_buckets", 64),
-            value_sigma_frac=getattr(self.cfg, "value_sigma_frac", 0.75),
+        use_amp = self.mixed_precision and self.device == "cuda"
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if use_amp else contextlib.nullcontext()
         )
+        with amp_ctx:
+            pol, wdl, ml = self.net(sq, sf)
+            loss, parts = total_loss(
+                pol, wdl, ml, pol_t, wdl_t, ml_t,
+                value_weight=getattr(self.cfg, "value_loss_weight", 1.0),
+                value_head_type=getattr(self.net, "value_head_type", "wdl"),
+                value_buckets=getattr(self.net, "value_buckets", 64),
+                value_sigma_frac=getattr(self.cfg, "value_sigma_frac", 0.75),
+            )
         loss.backward()
         nn.utils.clip_grad_norm_(self.net.parameters(), 1.0)
         self.opt.step()
