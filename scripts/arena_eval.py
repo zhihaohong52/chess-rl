@@ -11,7 +11,10 @@ Head-to-head (two checkpoints, MCTS at equal sims):
 """
 import argparse
 import os
+import random
 import sys
+
+import chess
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -41,23 +44,79 @@ def build_mcts_mover(evaluator, simulations):
     return mover
 
 
-def run_head_to_head(model, vs, games, simulations, device, max_moves):
-    if games % 2 != 0:
-        print(f"warning: --games {games} is odd; color split is uneven and the "
-              f"score carries a small first-mover bias. Use an even count.",
-              file=sys.stderr, flush=True)
+def _random_opening(rng, plies):
+    """A non-terminal board reached by `plies` uniform-random legal moves.
+
+    Gives two deterministic (temperature-0) MCTS engines a varied start so a
+    multi-game match isn't just the same line repeated. Falls back toward the
+    start position if a random walk happens to end the game early.
+    """
+    board = chess.Board()
+    for _ in range(plies):
+        moves = list(board.legal_moves)
+        if not moves or board.is_game_over():
+            break
+        board.push(rng.choice(moves))
+    return chess.Board() if board.is_game_over() else board
+
+
+def _play_game_from(start, white_mover, black_mover, max_moves):
+    """Play one game from `start`; return White's result (1.0/0.5/0.0)."""
+    board = start.copy()
+    moves = 0
+    while not board.is_game_over() and moves < max_moves:
+        mv = (white_mover if board.turn == chess.WHITE else black_mover)(board)
+        if mv is None or mv not in board.legal_moves:
+            return 0.0 if board.turn == chess.WHITE else 1.0
+        board.push(mv)
+        moves += 1
+    if not board.is_game_over():
+        return 0.5
+    outcome = board.outcome()
+    if outcome is None or outcome.winner is None:
+        return 0.5
+    return 1.0 if outcome.winner == chess.WHITE else 0.0
+
+
+def head_to_head_openings(mover_a, mover_b, games, max_moves, seed=0, opening_plies=8):
+    """Match mover_a vs mover_b over paired games from random openings.
+
+    Each opening is played twice (A as White, then B as White) so colours are
+    balanced. Returns (wins, draws, losses) from mover_a's perspective. With
+    deterministic engines, distinct openings are what create distinct games.
+    """
+    rng = random.Random(seed)
+    wins = draws = losses = 0
+    for _ in range(max(1, games // 2)):
+        opening = _random_opening(rng, opening_plies)
+        a_white = _play_game_from(opening, mover_a, mover_b, max_moves)        # A's score
+        b_white = _play_game_from(opening, mover_b, mover_a, max_moves)        # White=B
+        for a_score in (a_white, 1.0 - b_white):
+            if a_score == 1.0:
+                wins += 1
+            elif a_score == 0.5:
+                draws += 1
+            else:
+                losses += 1
+    return wins, draws, losses
+
+
+def run_head_to_head(model, vs, games, simulations, device, max_moves,
+                     seed=0, opening_plies=8):
     net_a, ev_a = load_for_eval(model, device=device)
     net_b, ev_b = load_for_eval(vs, device=device)
     mover_a = build_mcts_mover(ev_a, simulations)
     mover_b = build_mcts_mover(ev_b, simulations)
-    res = play_match(engine=mover_a, opponent=mover_b,
-                     num_games=games, max_moves=max_moves)
-    gap = elo_diff(res.score, games=res.total)
-    print(f"head-to-head (MCTS {simulations} sims): {os.path.basename(model)} "
-          f"vs {os.path.basename(vs)}", flush=True)
-    print(f"  W/D/L {res.wins}/{res.draws}/{res.losses}  score {res.score:.3f}  "
+    wins, draws, losses = head_to_head_openings(
+        mover_a, mover_b, games, max_moves, seed=seed, opening_plies=opening_plies)
+    total = wins + draws + losses
+    score = (wins + 0.5 * draws) / total if total else 0.5
+    gap = elo_diff(score, games=total)
+    print(f"head-to-head (MCTS {simulations} sims, {opening_plies}-ply random "
+          f"openings): {os.path.basename(model)} vs {os.path.basename(vs)}", flush=True)
+    print(f"  W/D/L {wins}/{draws}/{losses}  score {score:.3f}  "
           f"estEloGap {gap:+.0f}", flush=True)
-    return res
+    return wins, draws, losses
 
 
 def run_stockfish_ladder(model, skills, games, simulations, depth, device, max_moves):
@@ -90,11 +149,15 @@ def main():
     ap.add_argument("--depth", type=int, default=4)
     ap.add_argument("--max-moves", type=int, default=200)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--seed", type=int, default=0, help="RNG seed for head-to-head openings")
+    ap.add_argument("--opening-plies", type=int, default=8,
+                    help="random plies to vary head-to-head openings")
     args = ap.parse_args()
 
     if args.vs:
         run_head_to_head(args.model, args.vs, args.games, args.simulations,
-                         args.device, args.max_moves)
+                         args.device, args.max_moves, seed=args.seed,
+                         opening_plies=args.opening_plies)
         return 0
 
     if not stockfish_available():

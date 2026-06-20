@@ -25,3 +25,19 @@ def test_build_raw_mover_returns_legal_move():
     mover = ae.build_raw_mover(net, "cpu", me)
     move = mover(chess.Board())
     assert move in chess.Board().legal_moves
+
+
+def test_random_opening_is_non_terminal():
+    import random
+    board = ae._random_opening(random.Random(0), plies=8)
+    assert not board.is_game_over()
+
+
+def test_head_to_head_openings_symmetry_is_half():
+    # Identical deterministic engines: each random opening is played by both
+    # colours, so the per-pair scores cancel to exactly 0.5 overall.
+    w, d, l = ae.head_to_head_openings(_first_legal, _first_legal, games=20,
+                                       max_moves=40, seed=1, opening_plies=6)
+    total = w + d + l
+    assert total == 20
+    assert (w + 0.5 * d) / total == 0.5
