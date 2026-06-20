@@ -87,7 +87,8 @@ def head_to_head_openings(mover_a, mover_b, games, max_moves, seed=0, opening_pl
     """
     rng = random.Random(seed)
     wins = draws = losses = 0
-    for _ in range(max(1, games // 2)):
+    n_pairs = max(1, games // 2)
+    for pair in range(n_pairs):
         opening = _random_opening(rng, opening_plies)
         a_white = _play_game_from(opening, mover_a, mover_b, max_moves)        # A's score
         b_white = _play_game_from(opening, mover_b, mover_a, max_moves)        # White=B
@@ -98,6 +99,10 @@ def head_to_head_openings(mover_a, mover_b, games, max_moves, seed=0, opening_pl
                 draws += 1
             else:
                 losses += 1
+        if (pair + 1) % 5 == 0:
+            done = (pair + 1) * 2
+            print(f"  ...{done}/{2 * n_pairs} games  W/D/L {wins}/{draws}/{losses}",
+                  flush=True)
     return wins, draws, losses
 
 
