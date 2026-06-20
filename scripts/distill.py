@@ -18,7 +18,7 @@ from config import Config
 from src.model.presets import resolve_config
 from src.model.transformer import ChessTransformer
 from src.game.move_encoder import get_move_encoder
-from src.data.dataset import make_dataloader
+from src.data.dataset import make_dataloader, make_stream_dataloader
 from src.training.distill_trainer import DistillTrainer
 
 
@@ -37,6 +37,11 @@ def main():
     ap.add_argument("--mixed-precision", action="store_true")
     ap.add_argument("--ema-decay", type=float, default=0.0)
     ap.add_argument("--device", default=None, help="cuda|mps|cpu (default: auto)")
+    ap.add_argument("--stream", action="store_true",
+                    help="stream train shards one-at-a-time (bounded memory; "
+                         "required for datasets too large to fit in RAM)")
+    ap.add_argument("--num-workers", type=int, default=0,
+                    help="DataLoader worker processes for the train loader")
     args = ap.parse_args()
 
     # Resolve the model preset and align the LR schedule with this run's length.
@@ -47,9 +52,16 @@ def main():
     cfg.ema_decay = args.ema_decay
 
     P = get_move_encoder().policy_size
-    train_loader = make_dataloader(
-        sorted(glob.glob(args.train)), args.batch, P, shuffle=True
-    )
+    train_shards = sorted(glob.glob(args.train))
+    if args.stream:
+        train_loader = make_stream_dataloader(
+            train_shards, args.batch, P, shuffle=True, num_workers=args.num_workers
+        )
+    else:
+        train_loader = make_dataloader(
+            train_shards, args.batch, P, shuffle=True, num_workers=args.num_workers
+        )
+    # Val set is small; eager loading is fine (and evaluate() only reads 50 batches).
     val_loader = (
         make_dataloader(sorted(glob.glob(args.val)), args.batch, P, shuffle=False)
         if args.val

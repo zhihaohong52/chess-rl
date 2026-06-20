@@ -9,9 +9,11 @@ Contract:
     targets : (policy[B,P] float32, wdl[B,3] float32, ml[B,1] float32)
 """
 
+import random
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, IterableDataset
 
 
 class ShardDataset(Dataset):
@@ -134,3 +136,89 @@ def make_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
     )
+
+
+class StreamingShardDataset(IterableDataset):
+    """Stream examples one npz shard at a time to bound memory.
+
+    The eager ShardDataset concatenates every shard into RAM (~40 GB for 100M
+    positions). This loads a single shard at a time (~one shard resident),
+    yields its examples, then releases it. Per-example output matches
+    ShardDataset exactly. When ``shuffle`` is True the shard order and the
+    within-shard order are permuted each epoch; across DataLoader workers the
+    shards are partitioned by worker id so every example is produced exactly
+    once per epoch. Each yielded tensor owns its memory, so batches that span a
+    shard boundary stay valid after the previous shard is freed.
+    """
+
+    def __init__(self, shard_paths, policy_size: int, shuffle: bool = True,
+                 seed: int = 0):
+        self._paths = [str(p) for p in shard_paths]
+        if not self._paths:
+            raise ValueError("StreamingShardDataset: no shard paths provided")
+        self._policy_size = policy_size
+        self._shuffle = shuffle
+        self._seed = seed
+        self._epoch = 0
+
+    def __iter__(self):
+        info = torch.utils.data.get_worker_info()
+        worker_id = info.id if info is not None else 0
+        num_workers = info.num_workers if info is not None else 1
+        rng = random.Random(self._seed + self._epoch * 100003 + worker_id)
+        self._epoch += 1
+
+        paths = list(self._paths)
+        if self._shuffle:
+            rng.shuffle(paths)
+        paths = paths[worker_id::num_workers]  # disjoint partition per worker
+
+        for path in paths:
+            with np.load(path) as d:
+                sq = d["square_tokens"]
+                sf = d["state_features"]
+                wdl = d["wdl"]
+                ml = d["moves_left"]
+                counts = d["counts"]
+                flat_idx = d["legal_indices"]
+                flat_prob = d["legal_probs"]
+            offsets = np.empty(len(counts) + 1, dtype=np.int64)
+            offsets[0] = 0
+            np.cumsum(counts, out=offsets[1:])
+
+            order = list(range(len(sq)))
+            if self._shuffle:
+                rng.shuffle(order)
+            for i in order:
+                start = int(offsets[i])
+                end = int(offsets[i + 1])
+                # astype(copy) so each tensor owns memory independent of `d`.
+                sq_t = torch.from_numpy(sq[i].astype(np.int64))
+                sf_t = torch.from_numpy(sf[i].astype(np.float32))
+                policy = torch.zeros(self._policy_size, dtype=torch.float32)
+                if end > start:
+                    idx = torch.from_numpy(flat_idx[start:end].astype(np.int64))
+                    prob = torch.from_numpy(flat_prob[start:end].astype(np.float32))
+                    policy[idx] = prob
+                wdl_t = torch.from_numpy(wdl[i].astype(np.float32))
+                ml_t = torch.tensor([ml[i]], dtype=torch.float32)
+                yield (sq_t, sf_t), (policy, wdl_t, ml_t)
+
+
+def make_stream_dataloader(
+    shard_paths,
+    batch_size: int,
+    policy_size: int,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    seed: int = 0,
+) -> DataLoader:
+    """Memory-bounded DataLoader for large pre-encoded sets (streams shards).
+
+    Same batch contract as make_dataloader. Shuffling is handled inside the
+    dataset (IterableDataset forbids DataLoader shuffle=), so it is NOT passed
+    to DataLoader.
+    """
+    ds = StreamingShardDataset(shard_paths, policy_size=policy_size,
+                               shuffle=shuffle, seed=seed)
+    return DataLoader(ds, batch_size=batch_size, num_workers=num_workers)
