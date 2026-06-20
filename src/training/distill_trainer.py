@@ -83,7 +83,7 @@ class DistillTrainer:
         (sq, sf), (pol_t, wdl_t, ml_t) = self._to_device(inputs, targets)
         self.net.train()
         self.opt.zero_grad()
-        use_amp = self.mixed_precision and self.device == "cuda"
+        use_amp = self.mixed_precision and str(self.device).startswith("cuda")
         amp_ctx = (
             torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             if use_amp else contextlib.nullcontext()
