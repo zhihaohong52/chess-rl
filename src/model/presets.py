@@ -20,6 +20,9 @@ PRESETS = {
                         "ffn_type": "swiglu"},
     "p2-value-swiglu-drop": {"value_head_type": "hlgauss", "value_buckets": 64,
                              "ffn_type": "swiglu", "transformer_dropout": 0.05},
+    "p3-80m": {"d_model": 512, "n_layers": 16, "n_heads": 16, "d_ff": 3072,
+               "ffn_type": "swiglu", "value_head_type": "hlgauss",
+               "value_buckets": 64, "transformer_dropout": 0.05},
 }
 
 
