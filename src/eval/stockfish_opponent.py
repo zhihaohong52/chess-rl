@@ -84,15 +84,29 @@ class StockfishOpponent:
 
         self.skill_level = skill_level
         self.depth = depth
-        # Clamp Elo to at least 1320 — Stockfish's UCI_Elo minimum on many builds.
-        # Values below the engine's minimum cause an EngineError at configure time.
+        # Clamp Elo to Stockfish's UCI_Elo minimum, which varies by build
+        # (1320 on many, 1350 on SF 14.1). Start at 1320; if the engine rejects
+        # it ("...to be at least N"), parse N and retry so any build works.
         target_elo = max(1320, self.SKILL_TO_ELO.get(skill_level, 1500))
-        self._evaluator = StockfishEvaluator(
-            stockfish_path=stockfish_path,
-            depth=depth,
-            limit_strength=True,
-            elo=target_elo,
-        )
+        try:
+            self._evaluator = StockfishEvaluator(
+                stockfish_path=stockfish_path,
+                depth=depth,
+                limit_strength=True,
+                elo=target_elo,
+            )
+        except Exception as exc:  # noqa: BLE001 - retry once at the engine's min
+            import re  # noqa: PLC0415
+            m = re.search(r"at least (\d+)", str(exc))
+            if not m:
+                raise
+            target_elo = max(int(m.group(1)), target_elo)
+            self._evaluator = StockfishEvaluator(
+                stockfish_path=stockfish_path,
+                depth=depth,
+                limit_strength=True,
+                elo=target_elo,
+            )
         # Verify the strength limit was actually applied; otherwise the ladder Elo
         # labels are meaningless (Stockfish would run at full strength silently).
         opts = self._evaluator.engine.options
