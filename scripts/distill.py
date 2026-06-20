@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--val-every", type=int, default=1000)
     ap.add_argument("--mixed-precision", action="store_true")
     ap.add_argument("--ema-decay", type=float, default=0.0)
+    ap.add_argument("--device", default=None, help="cuda|mps|cpu (default: auto)")
     args = ap.parse_args()
 
     # Resolve the model preset and align the LR schedule with this run's length.
@@ -56,7 +57,8 @@ def main():
     )
 
     net = ChessTransformer(cfg)
-    trainer = DistillTrainer(net, cfg, mixed_precision=args.mixed_precision)
+    trainer = DistillTrainer(net, cfg, mixed_precision=args.mixed_precision,
+                             device=args.device)
     best = trainer.fit(
         train_loader,
         args.steps,

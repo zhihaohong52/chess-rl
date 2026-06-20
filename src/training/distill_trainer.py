@@ -24,10 +24,19 @@ def _make_scheduler(optimizer, warmup_steps: int, total_steps: int, min_lr_frac:
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def _default_device():
+    """Best available device: CUDA (box) > MPS (local M1) > CPU."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class DistillTrainer:
     def __init__(self, net, cfg, mixed_precision: bool = False, device=None):
         if device is None:
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            device = _default_device()
         self.device = device
         self.net = net.to(device)
         self.cfg = cfg
