@@ -12,7 +12,6 @@ Verify one shard first (the dataset's exact filename pattern can change):
 import argparse
 import os
 import subprocess
-import sys
 
 REPO = "prdev/chessbench-full-policy-value"
 BASE = f"https://huggingface.co/datasets/{REPO}/resolve/main"
@@ -33,12 +32,16 @@ def download_one(idx: int, out_dir: str) -> str:
         print(f"exists, skipping {dest}", flush=True)
         return dest
     url = shard_url(idx)
+    tmp = dest + ".part"
     print(f"downloading {url}", flush=True)
     rc = subprocess.call(
-        ["curl", "-fL", "--retry", "3", "--create-dirs", "-o", dest, url]
+        ["curl", "-fL", "--retry", "3", "--create-dirs", "-o", tmp, url]
     )
     if rc != 0:
+        if os.path.exists(tmp):
+            os.remove(tmp)
         raise RuntimeError(f"curl failed ({rc}) for {url}")
+    os.replace(tmp, dest)  # atomic; a partial .part is never seen as a finished shard
     return dest
 
 
@@ -49,9 +52,10 @@ def main():
     ap.add_argument("--out-dir", default="data/raw_hf")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
-    for idx in range(args.start, min(args.start + args.count, NUM_SHARDS)):
+    indices = range(args.start, min(args.start + args.count, NUM_SHARDS))
+    for idx in indices:
         download_one(idx, args.out_dir)
-    print(f"done: {args.count} shard(s) into {args.out_dir}", flush=True)
+    print(f"done: {len(indices)} shard(s) into {args.out_dir}", flush=True)
 
 
 if __name__ == "__main__":
