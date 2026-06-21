@@ -189,7 +189,13 @@ class DistillTrainer:
 
     def evaluate(self, val_loader, max_batches: int = 50):
         self.net.eval()
-        ps, vs, ts, n = 0.0, 0.0, 0.0, 0
+        import torch.nn.functional as F
+        from src.eval import metrics_core as mc
+        from src.model.value_dist import expected_value, hl_gauss_target
+        is_hl = getattr(self.net, "value_head_type", "wdl") == "hlgauss"
+        sigma = getattr(self.cfg, "value_sigma_frac", 0.75)
+        acc = {k: 0.0 for k in ("policy", "sign", "top1", "wdl_ce", "draw_cal", "ece")}
+        n = 0
         with torch.no_grad():
             for i, (inputs, targets) in enumerate(val_loader):
                 if i >= max_batches:
@@ -201,23 +207,35 @@ class DistillTrainer:
                     value_weight=getattr(self.cfg, "value_loss_weight", 1.0),
                     value_head_type=getattr(self.net, "value_head_type", "wdl"),
                     value_buckets=getattr(self.net, "value_buckets", 64),
-                    value_sigma_frac=getattr(self.cfg, "value_sigma_frac", 0.75),
+                    value_sigma_frac=sigma,
                 )
-                ps += float(parts["policy"])
-                if getattr(self.net, "value_head_type", "wdl") == "hlgauss":
-                    from src.model.value_dist import expected_value
+                acc["policy"] += float(parts["policy"])
+                acc["top1"] += top1_move_match(pol, pol_t)
+                v_tgt = wdl_t[:, 0] + 0.5 * wdl_t[:, 1]
+                if is_hl:
                     vhat = expected_value(wdl)
-                    v_tgt = wdl_t[:, 0] + 0.5 * wdl_t[:, 1]
-                    vs += float(((vhat > 0.5) == (v_tgt > 0.5)).float().mean())
+                    tgt = hl_gauss_target(v_tgt, wdl.shape[-1], sigma)
+                    acc["wdl_ce"] += float(-(tgt * F.log_softmax(wdl, dim=-1)).sum(-1).mean())
+                    acc["sign"] += float(((vhat > 0.5) == (v_tgt > 0.5)).float().mean())
+                    acc["draw_cal"] += float((vhat - v_tgt).abs().mean())
                 else:
-                    vs += value_sign_accuracy(wdl, wdl_t)
-                ts += top1_move_match(pol, pol_t)
+                    p = F.softmax(wdl, dim=1)
+                    vhat = p[:, 0] + 0.5 * p[:, 1]
+                    acc["wdl_ce"] += mc.wdl_cross_entropy(wdl, wdl_t)
+                    acc["sign"] += value_sign_accuracy(wdl, wdl_t)
+                    acc["draw_cal"] += mc.draw_calibration(wdl, wdl_t)
+                acc["ece"] += mc.value_ece(vhat, v_tgt)
                 n += 1
         n = max(n, 1)
+        # val_wdl_ce / val_draw_cal / val_ece make value calibration first-class:
+        # they print every val step so MCTS-relevant value quality is monitored live.
         return {
-            "val_policy_loss": ps / n,
-            "val_value_sign_acc": vs / n,
-            "val_top1": ts / n,
+            "val_policy_loss": acc["policy"] / n,
+            "val_value_sign_acc": acc["sign"] / n,
+            "val_top1": acc["top1"] / n,
+            "val_wdl_ce": acc["wdl_ce"] / n,
+            "val_draw_cal": acc["draw_cal"] / n,
+            "val_ece": acc["ece"] / n,
         }
 
     def fit(self, train_loader, steps: int, val_loader=None, val_every: int = 1000,

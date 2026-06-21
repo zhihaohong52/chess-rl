@@ -47,3 +47,32 @@ def draw_calibration(wdl_logits, wdl_target) -> float:
     pred_draw = p[:, 1].mean()
     target_draw = wdl_target[:, 1].mean()
     return float((pred_draw - target_draw).abs())
+
+
+def value_ece(pred_score, target_score, n_bins: int = 15) -> float:
+    """Expected calibration error of the value head's expected-score estimate.
+
+    Both inputs are expected scores (W + 0.5*D) in [0, 1] — predicted vs actual.
+    Positions are bucketed by predicted score into `n_bins` equal-width bins; for
+    each non-empty bin we take |mean(pred) - mean(actual)|; the result is the
+    sample-weighted mean of those gaps (a reliability-diagram ECE; 0 = perfectly
+    calibrated). This is the calibration-bucket metric MCTS leaf values need —
+    sign accuracy and a single draw-class gap both miss bin-wise miscalibration.
+    """
+    pred = pred_score.detach().reshape(-1).float()
+    target = target_score.detach().reshape(-1).float()
+    n = pred.numel()
+    if n == 0:
+        return 0.0
+    edges = torch.linspace(0.0, 1.0, n_bins + 1, device=pred.device)
+    ece = 0.0
+    for b in range(n_bins):
+        lo, hi = edges[b], edges[b + 1]
+        # the last bin is closed on the right so pred == 1.0 is counted
+        in_bin = (pred >= lo) & (pred <= hi) if b == n_bins - 1 else (pred >= lo) & (pred < hi)
+        cnt = int(in_bin.sum())
+        if cnt == 0:
+            continue
+        gap = (pred[in_bin].mean() - target[in_bin].mean()).abs()
+        ece += (cnt / n) * float(gap)
+    return ece

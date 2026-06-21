@@ -28,3 +28,21 @@ def test_trainer_hlgauss_step_and_eval():
     assert np.isfinite(loss) and np.isfinite(parts["value"])
     metrics = trainer.evaluate([(inputs, targets)], max_batches=1)
     assert np.isfinite(metrics["val_value_sign_acc"])
+
+
+def test_trainer_evaluate_reports_calibration_metrics():
+    # value calibration is first-class: evaluate() always returns these keys for
+    # both head types, so the training loop prints them live every val step.
+    for vht in ("hlgauss", "wdl"):
+        cfg = resolve_config("baseline-v1")
+        cfg.value_head_type = vht
+        if vht == "hlgauss":
+            cfg.value_buckets = 64
+        net = ChessTransformer(cfg)
+        trainer = DistillTrainer(net, cfg, device="cpu")
+        inputs, targets = _batch()
+        m = trainer.evaluate([(inputs, targets)], max_batches=1)
+        for k in ("val_wdl_ce", "val_draw_cal", "val_ece"):
+            assert k in m, f"{k} missing for {vht}"
+            assert np.isfinite(m[k]), f"{k} not finite for {vht}"
+        assert 0.0 <= m["val_ece"] <= 1.0
