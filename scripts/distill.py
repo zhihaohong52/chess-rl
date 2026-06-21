@@ -22,7 +22,7 @@ from src.data.dataset import make_dataloader, make_stream_dataloader
 from src.training.distill_trainer import DistillTrainer
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", required=True, help="glob for training shards (*.npz)")
     ap.add_argument("--val", default=None, help="glob for validation shards (*.npz)")
@@ -37,19 +37,35 @@ def main():
     ap.add_argument("--mixed-precision", action="store_true")
     ap.add_argument("--ema-decay", type=float, default=0.0)
     ap.add_argument("--device", default=None, help="cuda|mps|cpu (default: auto)")
+    ap.add_argument("--value-loss-weight", type=float, default=None,
+                    help="override value_loss_weight (default: preset/config value, "
+                         "1.0); e.g. 0.3 down-weights the value head to free policy "
+                         "capacity")
     ap.add_argument("--stream", action="store_true",
                     help="stream train shards one-at-a-time (bounded memory; "
                          "required for datasets too large to fit in RAM)")
     ap.add_argument("--num-workers", type=int, default=0,
                     help="DataLoader worker processes for the train loader")
-    args = ap.parse_args()
+    return ap
 
-    # Resolve the model preset and align the LR schedule with this run's length.
+
+def resolve_run_config(args):
+    """Resolve the preset Config and apply this run's CLI overrides: the LR
+    schedule (lr/warmup/steps), EMA decay, and the optional value-loss-weight.
+    Returns the mutated Config so callers (and tests) can inspect it."""
     cfg = resolve_config(args.preset)
     cfg.distill_lr = args.lr
     cfg.distill_warmup_steps = args.warmup
     cfg.distill_total_steps = args.steps
     cfg.ema_decay = args.ema_decay
+    if args.value_loss_weight is not None:
+        cfg.value_loss_weight = args.value_loss_weight
+    return cfg
+
+
+def main():
+    args = build_parser().parse_args()
+    cfg = resolve_run_config(args)
 
     P = get_move_encoder().policy_size
     train_shards = sorted(glob.glob(args.train))
