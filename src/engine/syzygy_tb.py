@@ -20,6 +20,17 @@ import chess
 import chess.syzygy
 
 
+def syzygy_available(directory: Optional[str]) -> bool:
+    """True if `directory` exists and holds at least one WDL table (`*.rtbw`).
+
+    Mirrors `stockfish_available` so scripts/tests can gate on real tables being
+    present without opening them.
+    """
+    if not directory or not os.path.isdir(directory):
+        return False
+    return any(f.endswith(".rtbw") for f in os.listdir(directory))
+
+
 class SyzygyTablebase:
     def __init__(
         self,
