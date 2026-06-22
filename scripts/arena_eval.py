@@ -26,6 +26,34 @@ from src.eval.elo import elo_diff
 from src.eval.stockfish_opponent import StockfishOpponent, stockfish_available
 from src.mcts.batched_mcts import BatchedMCTS
 from src.game.move_encoder import get_move_encoder
+from src.engine.opening_book import OpeningBook, book_available
+from src.engine.syzygy_tb import SyzygyTablebase, syzygy_available
+from src.engine.hybrid_mover import build_hybrid_mover
+
+
+def _load_book_tb(args):
+    """Build (book, tablebase) from CLI args, guarded on files existing.
+
+    A given-but-missing path prints a warning and is skipped (returns None for
+    that component) rather than crashing — eval still runs without it.
+    """
+    book = None
+    if getattr(args, "book", None):
+        if book_available(args.book):
+            book = OpeningBook(args.book)
+            print(f"opening book: {args.book}", flush=True)
+        else:
+            print(f"warning: opening book not found at {args.book}; skipping",
+                  file=sys.stderr)
+    tablebase = None
+    if getattr(args, "syzygy", None):
+        if syzygy_available(args.syzygy):
+            tablebase = SyzygyTablebase(args.syzygy, max_pieces=args.max_pieces)
+            print(f"syzygy: {args.syzygy} (<= {args.max_pieces} men)", flush=True)
+        else:
+            print(f"warning: no syzygy tables in {args.syzygy}; skipping",
+                  file=sys.stderr)
+    return book, tablebase
 
 
 def build_raw_mover(net, device, me):
@@ -107,11 +135,16 @@ def head_to_head_openings(mover_a, mover_b, games, max_moves, seed=0, opening_pl
 
 
 def run_head_to_head(model, vs, games, simulations, device, max_moves,
-                     seed=0, opening_plies=8):
+                     seed=0, opening_plies=8, book=None, tablebase=None,
+                     tb_one_side=False):
     net_a, ev_a = load_for_eval(model, device=device)
     net_b, ev_b = load_for_eval(vs, device=device)
-    mover_a = build_mcts_mover(ev_a, simulations)
-    mover_b = build_mcts_mover(ev_b, simulations)
+    mover_a = build_hybrid_mover(ev_a, simulations, book=book, tablebase=tablebase)
+    if tb_one_side:
+        # B is plain MCTS: isolates A's book/TB edge (e.g. endgame Elo)
+        mover_b = build_mcts_mover(ev_b, simulations)
+    else:
+        mover_b = build_hybrid_mover(ev_b, simulations, book=book, tablebase=tablebase)
     wins, draws, losses = head_to_head_openings(
         mover_a, mover_b, games, max_moves, seed=seed, opening_plies=opening_plies)
     total = wins + draws + losses
@@ -124,11 +157,12 @@ def run_head_to_head(model, vs, games, simulations, device, max_moves,
     return wins, draws, losses
 
 
-def run_stockfish_ladder(model, skills, games, simulations, depth, device, max_moves):
+def run_stockfish_ladder(model, skills, games, simulations, depth, device, max_moves,
+                         book=None, tablebase=None):
     net, ev = load_for_eval(model, device=device)
     me = get_move_encoder()
     raw_mover = build_raw_mover(net, device, me)
-    mcts_mover = build_mcts_mover(ev, simulations)
+    mcts_mover = build_hybrid_mover(ev, simulations, book=book, tablebase=tablebase)
     print(f"model={model}  games/skill={games}  sims={simulations}  sf_depth={depth}",
           flush=True)
     print(f"{'mover':>6} {'skill':>5} {'W/D/L':>10} {'score':>6} {'estElo':>7}",
@@ -157,19 +191,29 @@ def main():
     ap.add_argument("--seed", type=int, default=0, help="RNG seed for head-to-head openings")
     ap.add_argument("--opening-plies", type=int, default=8,
                     help="random plies to vary head-to-head openings")
+    ap.add_argument("--book", default=None, help="path to a Polyglot .bin opening book")
+    ap.add_argument("--syzygy", default=None, help="path to a Syzygy tablebase directory")
+    ap.add_argument("--max-pieces", type=int, default=5,
+                    help="max men for Syzygy probes (3-4-5 tables -> 5)")
+    ap.add_argument("--tb-one-side", action="store_true",
+                    help="head-to-head: give book/TB to --model only (isolates its edge)")
     args = ap.parse_args()
+
+    book, tablebase = _load_book_tb(args)
 
     if args.vs:
         run_head_to_head(args.model, args.vs, args.games, args.simulations,
                          args.device, args.max_moves, seed=args.seed,
-                         opening_plies=args.opening_plies)
+                         opening_plies=args.opening_plies, book=book,
+                         tablebase=tablebase, tb_one_side=args.tb_one_side)
         return 0
 
     if not stockfish_available():
         print("Stockfish not found; cannot run ladder.", file=sys.stderr)
         return 1
     run_stockfish_ladder(args.model, args.skills, args.games, args.simulations,
-                         args.depth, args.device, args.max_moves)
+                         args.depth, args.device, args.max_moves,
+                         book=book, tablebase=tablebase)
     return 0
 
 
