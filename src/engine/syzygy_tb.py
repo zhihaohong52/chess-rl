@@ -64,6 +64,40 @@ class SyzygyTablebase:
             return -self.cursed_win_value
         return 0.0         # true draw
 
+    @staticmethod
+    def _rank_key(our_wdl: int, child_dtz: Optional[int]):
+        """Move-ranking key (higher = better): WDL first, then DTZ.
+
+        Primary `our_wdl` never discards a win or draw. Secondary `child_dtz`
+        (opponent POV) maximized: for winning moves the child DTZ is negative, so
+        larger = closer to 0 = faster mate; for losing moves it is positive, so
+        larger = longer resistance. (WDL-optimal; the DTZ tie-break is a practical
+        fast-convert/long-resist heuristic, not a fully 50-move-exact DTZ solver.)
+        """
+        return (our_wdl, child_dtz if child_dtz is not None else 0)
+
+    def best_dtz_move(self, board: chess.Board) -> Optional[chess.Move]:
+        """The WDL-optimal root move (DTZ-tie-broken), or None out of scope /
+        when any child table is missing (caller falls back to MCTS)."""
+        if not self.in_scope(board):
+            return None
+        best_move = None
+        best_key = None
+        for move in board.legal_moves:
+            board.push(move)
+            try:
+                child_wdl = self._tb.get_wdl(board)
+                child_dtz = self._tb.get_dtz(board)
+            finally:
+                board.pop()
+            if child_wdl is None:
+                return None  # incomplete tables — fall back rather than guess
+            key = self._rank_key(-child_wdl, child_dtz)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_move = move
+        return best_move
+
     def close(self) -> None:
         self._tb.close()
 
