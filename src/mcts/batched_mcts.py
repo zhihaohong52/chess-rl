@@ -14,12 +14,16 @@ def _terminal_value(board) -> float:
 
 
 class BatchedMCTS:
-    def __init__(self, evaluator, config=None, num_simulations=None, batch_size: int = 8):
+    def __init__(self, evaluator, config=None, num_simulations=None, batch_size: int = 8,
+                 tablebase=None):
         self.evaluator = evaluator
         self.config = config or Config()
         self.num_simulations = num_simulations or self.config.num_simulations
         self.c_puct = self.config.c_puct
         self.batch_size = batch_size
+        # Optional Syzygy tablebase: when set, leaves it can probe get exact
+        # endgame values instead of the neural net. None = unchanged behavior.
+        self.tablebase = tablebase
         self._root = None
         self._tracked = None  # chess.Board matching self._root
 
@@ -66,7 +70,14 @@ class BatchedMCTS:
                 if b.is_game_over():
                     terminals.append((path, _terminal_value(b)))
                 else:
-                    paths.append(path); boards.append(b); leaves.append(node)
+                    tb_val = (self.tablebase.probe_value(b)
+                              if self.tablebase is not None else None)
+                    if tb_val is not None:
+                        # Exact endgame value — treat like a terminal: no NN
+                        # evaluation, no expansion, just back up the true value.
+                        terminals.append((path, tb_val))
+                    else:
+                        paths.append(path); boards.append(b); leaves.append(node)
                 done += 1
 
             if boards:
