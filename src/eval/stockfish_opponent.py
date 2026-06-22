@@ -95,12 +95,16 @@ class StockfishOpponent:
                 limit_strength=True,
                 elo=target_elo,
             )
-        except Exception as exc:  # noqa: BLE001 - retry once at the engine's min
+        except Exception as exc:  # noqa: BLE001 - retry once at the engine's min/max
             import re  # noqa: PLC0415
-            m = re.search(r"at least (\d+)", str(exc))
-            if not m:
+            m_min = re.search(r"at least (\d+)", str(exc))
+            m_max = re.search(r"at most (\d+)", str(exc))
+            if m_min:
+                target_elo = max(int(m_min.group(1)), target_elo)
+            elif m_max:
+                target_elo = min(int(m_max.group(1)), target_elo)
+            else:
                 raise
-            target_elo = max(int(m.group(1)), target_elo)
             self._evaluator = StockfishEvaluator(
                 stockfish_path=stockfish_path,
                 depth=depth,
