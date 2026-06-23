@@ -15,10 +15,20 @@ from config import Config
 from src.mcts.batched_mcts import BatchedMCTS
 
 
-def build_hybrid_mover(evaluator, simulations, *, book=None, tablebase=None, config=None):
-    """Return a MoveProducer (chess.Board -> Optional[chess.Move])."""
+def build_hybrid_mover(evaluator, simulations, *, book=None, tablebase=None,
+                       config=None, c_puct=None, fpu=None):
+    """Return a MoveProducer (chess.Board -> Optional[chess.Move]).
+
+    `c_puct` / `fpu` override the search exploration constant and first-play-
+    urgency reduction for this mover only (None = inherit from config). Used to
+    A/B different search configs of the same checkpoint.
+    """
     mcts = BatchedMCTS(evaluator, config or Config, num_simulations=simulations,
                        tablebase=tablebase)
+    if c_puct is not None:
+        mcts.c_puct = c_puct
+    if fpu is not None:
+        mcts.fpu_reduction = fpu
 
     def mover(board):
         if book is not None:

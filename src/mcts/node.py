@@ -60,13 +60,19 @@ class Node:
         for move_idx in legal_moves:
             self.children[move_idx] = Node(prior=masked_policy[move_idx])
 
-    def select_child(self, c_puct: float) -> tuple:
+    def select_child(self, c_puct: float, fpu_reduction: Optional[float] = None) -> tuple:
         """Select the best child using PUCT formula.
 
         PUCT(s,a) = Q(s,a) + c_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
 
         Args:
             c_puct: Exploration constant.
+            fpu_reduction: First-play-urgency reduction. When None (default),
+                an unvisited child contributes q=0 (historical behavior). When
+                set, an unvisited child's q is `parent_Q - fpu_reduction` (from
+                this node's perspective), so the search exploits already-good
+                moves before exploring fresh priors. Visited children always
+                use their negamax q (`-child.value`).
 
         Returns:
             Tuple of (move_index, child_node) for the best child.
@@ -76,10 +82,15 @@ class Node:
         best_child = None
 
         sqrt_total_visits = np.sqrt(self.visit_count)
+        # FPU value for unvisited children, in this node's perspective.
+        fpu_value = None if fpu_reduction is None else self.value - fpu_reduction
 
         for move_idx, child in self.children.items():
             # PUCT formula
-            q_value = -child.value  # Negamax: opponent's value is negated
+            if fpu_value is not None and child.visit_count == 0:
+                q_value = fpu_value
+            else:
+                q_value = -child.value  # Negamax: opponent's value is negated
             exploration = c_puct * child.prior * sqrt_total_visits / (1 + child.visit_count)
             score = q_value + exploration
 

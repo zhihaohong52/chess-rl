@@ -20,6 +20,7 @@ class Config:
     # MCTS parameters
     num_simulations = 400  # Simulations per move
     c_puct = 1.5  # Exploration constant
+    fpu_reduction = None  # First-play-urgency reduction (None = off)
     dirichlet_alpha = 0.2  # Noise for root exploration
     dirichlet_epsilon = 0.15  # Weight of noise
     dirichlet_moves = 12  # Add root noise only for first N moves

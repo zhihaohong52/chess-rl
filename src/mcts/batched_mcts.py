@@ -20,6 +20,8 @@ class BatchedMCTS:
         self.config = config or Config()
         self.num_simulations = num_simulations or self.config.num_simulations
         self.c_puct = self.config.c_puct
+        # First-play-urgency reduction (None = off, historical numerics).
+        self.fpu_reduction = getattr(self.config, "fpu_reduction", None)
         self.batch_size = batch_size
         # Optional Syzygy tablebase: when set, leaves it can probe get exact
         # endgame values instead of the neural net. None = unchanged behavior.
@@ -62,7 +64,7 @@ class BatchedMCTS:
                 b = board.copy()
                 path = [node]
                 while node.is_expanded() and not b.is_game_over():
-                    move, node = node.select_child(self.c_puct)
+                    move, node = node.select_child(self.c_puct, self.fpu_reduction)
                     b.push(move)
                     path.append(node)
                 for nd in path:

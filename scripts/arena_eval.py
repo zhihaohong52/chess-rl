@@ -61,15 +61,34 @@ def build_raw_mover(net, device, me):
     return lambda board: _best_legal_move(net, device, board, me)
 
 
-def build_mcts_mover(evaluator, simulations):
-    """Move-producer: MCTS at fixed simulations, greedy (temperature 0)."""
+def build_mcts_mover(evaluator, simulations, c_puct=None, fpu=None):
+    """Move-producer: MCTS at fixed simulations, greedy (temperature 0).
+
+    `c_puct` / `fpu` override the search exploration constant and first-play-
+    urgency reduction for this mover only (None = inherit from config). Used to
+    A/B different search configs of the same checkpoint.
+    """
     mcts = BatchedMCTS(evaluator, Config, num_simulations=simulations)
+    if c_puct is not None:
+        mcts.c_puct = c_puct
+    if fpu is not None:
+        mcts.fpu_reduction = fpu
 
     def mover(board):
         mcts.reset()
         return mcts.choose_move(board, temperature=0.0)
 
     return mover
+
+
+def _search_cfg_str(simulations, c_puct, fpu):
+    """Compact human label for a side's search config, e.g. '800 sims, c_puct=2.5'."""
+    parts = [f"{simulations} sims"]
+    if c_puct is not None:
+        parts.append(f"c_puct={c_puct}")
+    if fpu is not None:
+        parts.append(f"fpu={fpu}")
+    return ", ".join(parts)
 
 
 def _random_opening(rng, plies):
@@ -136,24 +155,46 @@ def head_to_head_openings(mover_a, mover_b, games, max_moves, seed=0, opening_pl
 
 def run_head_to_head(model, vs, games, simulations, device, max_moves,
                      seed=0, opening_plies=8, book=None, tablebase=None,
-                     tb_one_side=False):
+                     tb_one_side=False, c_puct=None, fpu=None,
+                     sims_b=None, c_puct_b=None, fpu_b=None):
+    """Paired head-to-head of two movers from random openings.
+
+    Side A uses (`simulations`, `c_puct`, `fpu`). Side B (`--vs`) defaults to
+    mirroring A, but `sims_b` / `c_puct_b` / `fpu_b` override it independently —
+    this is the A/B tool for tuning search on the *same* checkpoint (pass the
+    same path to `model` and `vs`). When all B overrides are None the match is
+    symmetric, identical to the prior behavior.
+    """
+    sims_b = simulations if sims_b is None else sims_b
+    c_puct_b = c_puct if c_puct_b is None else c_puct_b
+    fpu_b = fpu if fpu_b is None else fpu_b
+
     net_a, ev_a = load_for_eval(model, device=device)
     net_b, ev_b = load_for_eval(vs, device=device)
-    mover_a = build_hybrid_mover(ev_a, simulations, book=book, tablebase=tablebase)
+    mover_a = build_hybrid_mover(ev_a, simulations, book=book, tablebase=tablebase,
+                                 c_puct=c_puct, fpu=fpu)
     if tb_one_side:
         # B is plain MCTS: isolates A's book/TB edge (e.g. endgame Elo)
-        mover_b = build_mcts_mover(ev_b, simulations)
+        mover_b = build_mcts_mover(ev_b, sims_b, c_puct=c_puct_b, fpu=fpu_b)
     else:
-        mover_b = build_hybrid_mover(ev_b, simulations, book=book, tablebase=tablebase)
+        mover_b = build_hybrid_mover(ev_b, sims_b, book=book, tablebase=tablebase,
+                                     c_puct=c_puct_b, fpu=fpu_b)
     wins, draws, losses = head_to_head_openings(
         mover_a, mover_b, games, max_moves, seed=seed, opening_plies=opening_plies)
     total = wins + draws + losses
     score = (wins + 0.5 * draws) / total if total else 0.5
     gap = elo_diff(score, games=total)
-    print(f"head-to-head (MCTS {simulations} sims, {opening_plies}-ply random "
-          f"openings): {os.path.basename(model)} vs {os.path.basename(vs)}", flush=True)
+    cfg_a = _search_cfg_str(simulations, c_puct, fpu)
+    cfg_b = _search_cfg_str(sims_b, c_puct_b, fpu_b)
+    if cfg_a == cfg_b:
+        print(f"head-to-head ({cfg_a}, {opening_plies}-ply random openings): "
+              f"{os.path.basename(model)} vs {os.path.basename(vs)}", flush=True)
+    else:
+        print(f"head-to-head ({opening_plies}-ply random openings): "
+              f"{os.path.basename(model)} [{cfg_a}]  vs  "
+              f"{os.path.basename(vs)} [{cfg_b}]", flush=True)
     print(f"  W/D/L {wins}/{draws}/{losses}  score {score:.3f}  "
-          f"estEloGap {gap:+.0f}", flush=True)
+          f"estEloGap(A) {gap:+.0f}", flush=True)
     return wins, draws, losses
 
 
@@ -197,6 +238,17 @@ def main():
                     help="max men for Syzygy probes (3-4-5 tables -> 5)")
     ap.add_argument("--tb-one-side", action="store_true",
                     help="head-to-head: give book/TB to --model only (isolates its edge)")
+    # Per-side search-config A/B (point --model and --vs at the same checkpoint).
+    ap.add_argument("--c-puct", type=float, default=None,
+                    help="head-to-head side A: exploration constant (default: config)")
+    ap.add_argument("--fpu", type=float, default=None,
+                    help="head-to-head side A: first-play-urgency reduction (default: off)")
+    ap.add_argument("--sims-b", type=int, default=None,
+                    help="head-to-head side B (--vs): simulations (default: mirror --simulations)")
+    ap.add_argument("--c-puct-b", type=float, default=None,
+                    help="head-to-head side B: exploration constant (default: mirror --c-puct)")
+    ap.add_argument("--fpu-b", type=float, default=None,
+                    help="head-to-head side B: fpu reduction (default: mirror --fpu)")
     args = ap.parse_args()
 
     book, tablebase = _load_book_tb(args)
@@ -205,7 +257,9 @@ def main():
         run_head_to_head(args.model, args.vs, args.games, args.simulations,
                          args.device, args.max_moves, seed=args.seed,
                          opening_plies=args.opening_plies, book=book,
-                         tablebase=tablebase, tb_one_side=args.tb_one_side)
+                         tablebase=tablebase, tb_one_side=args.tb_one_side,
+                         c_puct=args.c_puct, fpu=args.fpu, sims_b=args.sims_b,
+                         c_puct_b=args.c_puct_b, fpu_b=args.fpu_b)
         return 0
 
     if not stockfish_available():
