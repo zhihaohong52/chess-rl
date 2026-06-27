@@ -9,13 +9,15 @@
       "Bash(git push:*)",
       "Bash(git pull:*)",
       "Bash(python -m py_compile:*)",
+      "Bash(tnr:*)",
       "Skill(update-config)",
       "Skill(deep-research)",
       "WebFetch(domain:getdeploying.com)",
       "WebFetch(domain:gpuperhour.com)",
       "WebFetch(domain:northflank.com)",
       "WebFetch(domain:intuitionlabs.ai)",
-      "WebFetch(domain:www.spheron.network)"
+      "WebFetch(domain:www.spheron.network)",
+      "Bash(rtk find *)"
     ]
   }
 }

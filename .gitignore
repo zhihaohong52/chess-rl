@@ -40,3 +40,5 @@ Thumbs.db
 /.serena
 /.rtk
 /.venv
+/graphify-out/
+/logs_p3/
