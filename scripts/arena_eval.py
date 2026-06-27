@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Arena eval: RAW vs MCTS vs Stockfish, and model-vs-model head-to-head.
+
+Stockfish ladder (default):
+  python scripts/arena_eval.py --model checkpoints/p3_80m/best_ema.pt \
+      --skills 1 3 5 --games 40 --simulations 100 --depth 4
+
+Head-to-head (two checkpoints, MCTS at equal sims):
+  python scripts/arena_eval.py --model checkpoints/p3_80m/best_ema.pt \
+      --vs checkpoints/p3_10m_ctrl/best_ema.pt --games 100 --simulations 100
+"""
+import argparse
+import os
+import random
+import sys
+
+import chess
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import Config
+from src.eval.routing import load_for_eval
+from src.eval.gates import _best_legal_move
+from src.eval.arena import play_match
+from src.eval.elo import elo_diff
+from src.eval.stockfish_opponent import StockfishOpponent, stockfish_available
+from src.mcts.batched_mcts import BatchedMCTS
+from src.game.move_encoder import get_move_encoder
+from src.engine.opening_book import OpeningBook, book_available
+from src.engine.syzygy_tb import SyzygyTablebase, syzygy_available
+from src.engine.hybrid_mover import build_hybrid_mover
+
+
+def _load_book_tb(args):
+    """Build (book, tablebase) from CLI args, guarded on files existing.
+
+    A given-but-missing path prints a warning and is skipped (returns None for
+    that component) rather than crashing — eval still runs without it.
+    """
+    book = None
+    if getattr(args, "book", None):
+        if book_available(args.book):
+            book = OpeningBook(args.book)
+            print(f"opening book: {args.book}", flush=True)
+        else:
+            print(f"warning: opening book not found at {args.book}; skipping",
+                  file=sys.stderr)
+    tablebase = None
+    if getattr(args, "syzygy", None):
+        if syzygy_available(args.syzygy):
+            tablebase = SyzygyTablebase(args.syzygy, max_pieces=args.max_pieces)
+            print(f"syzygy: {args.syzygy} (<= {args.max_pieces} men)", flush=True)
+        else:
+            print(f"warning: no syzygy tables in {args.syzygy}; skipping",
+                  file=sys.stderr)
+    return book, tablebase
+
+
+def build_raw_mover(net, device, me):
+    """Move-producer: greedy best legal move from the raw policy."""
+    return lambda board: _best_legal_move(net, device, board, me)
+
+
+def build_mcts_mover(evaluator, simulations, c_puct=None, fpu=None):
+    """Move-producer: MCTS at fixed simulations, greedy (temperature 0).
+
+    `c_puct` / `fpu` override the search exploration constant and first-play-
+    urgency reduction for this mover only (None = inherit from config). Used to
+    A/B different search configs of the same checkpoint.
+    """
+    mcts = BatchedMCTS(evaluator, Config, num_simulations=simulations)
+    if c_puct is not None:
+        mcts.c_puct = c_puct
+    if fpu is not None:
+        mcts.fpu_reduction = fpu
+
+    def mover(board):
+        mcts.reset()
+        return mcts.choose_move(board, temperature=0.0)
+
+    return mover
+
+
+def _search_cfg_str(simulations, c_puct, fpu):
+    """Compact human label for a side's search config, e.g. '800 sims, c_puct=2.5'."""
+    parts = [f"{simulations} sims"]
+    if c_puct is not None:
+        parts.append(f"c_puct={c_puct}")
+    if fpu is not None:
+        parts.append(f"fpu={fpu}")
+    return ", ".join(parts)
+
+
+def _random_opening(rng, plies):
+    """A non-terminal board reached by `plies` uniform-random legal moves.
+
+    Gives two deterministic (temperature-0) MCTS engines a varied start so a
+    multi-game match isn't just the same line repeated. Falls back toward the
+    start position if a random walk happens to end the game early.
+    """
+    board = chess.Board()
+    for _ in range(plies):
+        moves = list(board.legal_moves)
+        if not moves or board.is_game_over():
+            break
+        board.push(rng.choice(moves))
+    return chess.Board() if board.is_game_over() else board
+
+
+def _play_game_from(start, white_mover, black_mover, max_moves):
+    """Play one game from `start`; return White's result (1.0/0.5/0.0)."""
+    board = start.copy()
+    moves = 0
+    while not board.is_game_over() and moves < max_moves:
+        mv = (white_mover if board.turn == chess.WHITE else black_mover)(board)
+        if mv is None or mv not in board.legal_moves:
+            return 0.0 if board.turn == chess.WHITE else 1.0
+        board.push(mv)
+        moves += 1
+    if not board.is_game_over():
+        return 0.5
+    outcome = board.outcome()
+    if outcome is None or outcome.winner is None:
+        return 0.5
+    return 1.0 if outcome.winner == chess.WHITE else 0.0
+
+
+def head_to_head_openings(mover_a, mover_b, games, max_moves, seed=0, opening_plies=8):
+    """Match mover_a vs mover_b over paired games from random openings.
+
+    Each opening is played twice (A as White, then B as White) so colours are
+    balanced. Returns (wins, draws, losses) from mover_a's perspective. With
+    deterministic engines, distinct openings are what create distinct games.
+    """
+    rng = random.Random(seed)
+    wins = draws = losses = 0
+    n_pairs = max(1, games // 2)
+    for pair in range(n_pairs):
+        opening = _random_opening(rng, opening_plies)
+        a_white = _play_game_from(opening, mover_a, mover_b, max_moves)        # A's score
+        b_white = _play_game_from(opening, mover_b, mover_a, max_moves)        # White=B
+        for a_score in (a_white, 1.0 - b_white):
+            if a_score == 1.0:
+                wins += 1
+            elif a_score == 0.5:
+                draws += 1
+            else:
+                losses += 1
+        if (pair + 1) % 5 == 0:
+            done = (pair + 1) * 2
+            print(f"  ...{done}/{2 * n_pairs} games  W/D/L {wins}/{draws}/{losses}",
+                  flush=True)
+    return wins, draws, losses
+
+
+def run_head_to_head(model, vs, games, simulations, device, max_moves,
+                     seed=0, opening_plies=8, book=None, tablebase=None,
+                     tb_one_side=False, c_puct=None, fpu=None,
+                     sims_b=None, c_puct_b=None, fpu_b=None):
+    """Paired head-to-head of two movers from random openings.
+
+    Side A uses (`simulations`, `c_puct`, `fpu`). Side B (`--vs`) defaults to
+    mirroring A, but `sims_b` / `c_puct_b` / `fpu_b` override it independently —
+    this is the A/B tool for tuning search on the *same* checkpoint (pass the
+    same path to `model` and `vs`). When all B overrides are None the match is
+    symmetric, identical to the prior behavior.
+    """
+    sims_b = simulations if sims_b is None else sims_b
+    c_puct_b = c_puct if c_puct_b is None else c_puct_b
+    fpu_b = fpu if fpu_b is None else fpu_b
+
+    net_a, ev_a = load_for_eval(model, device=device)
+    net_b, ev_b = load_for_eval(vs, device=device)
+    mover_a = build_hybrid_mover(ev_a, simulations, book=book, tablebase=tablebase,
+                                 c_puct=c_puct, fpu=fpu)
+    if tb_one_side:
+        # B is plain MCTS: isolates A's book/TB edge (e.g. endgame Elo)
+        mover_b = build_mcts_mover(ev_b, sims_b, c_puct=c_puct_b, fpu=fpu_b)
+    else:
+        mover_b = build_hybrid_mover(ev_b, sims_b, book=book, tablebase=tablebase,
+                                     c_puct=c_puct_b, fpu=fpu_b)
+    wins, draws, losses = head_to_head_openings(
+        mover_a, mover_b, games, max_moves, seed=seed, opening_plies=opening_plies)
+    total = wins + draws + losses
+    score = (wins + 0.5 * draws) / total if total else 0.5
+    gap = elo_diff(score, games=total)
+    cfg_a = _search_cfg_str(simulations, c_puct, fpu)
+    cfg_b = _search_cfg_str(sims_b, c_puct_b, fpu_b)
+    if cfg_a == cfg_b:
+        print(f"head-to-head ({cfg_a}, {opening_plies}-ply random openings): "
+              f"{os.path.basename(model)} vs {os.path.basename(vs)}", flush=True)
+    else:
+        print(f"head-to-head ({opening_plies}-ply random openings): "
+              f"{os.path.basename(model)} [{cfg_a}]  vs  "
+              f"{os.path.basename(vs)} [{cfg_b}]", flush=True)
+    print(f"  W/D/L {wins}/{draws}/{losses}  score {score:.3f}  "
+          f"estEloGap(A) {gap:+.0f}", flush=True)
+    return wins, draws, losses
+
+
+def run_stockfish_ladder(model, skills, games, simulations, depth, device, max_moves,
+                         book=None, tablebase=None):
+    net, ev = load_for_eval(model, device=device)
+    me = get_move_encoder()
+    raw_mover = build_raw_mover(net, device, me)
+    mcts_mover = build_hybrid_mover(ev, simulations, book=book, tablebase=tablebase)
+    print(f"model={model}  games/skill={games}  sims={simulations}  sf_depth={depth}",
+          flush=True)
+    print(f"{'mover':>6} {'skill':>5} {'W/D/L':>10} {'score':>6} {'estElo':>7}",
+          flush=True)
+    for skill in skills:
+        for name, mover in (("raw", raw_mover), ("mcts", mcts_mover)):
+            with StockfishOpponent(skill_level=skill, depth=depth) as opp:
+                res = play_match(engine=mover, opponent=opp,
+                                 num_games=games, max_moves=max_moves)
+                est = opp.approximate_elo + elo_diff(res.score, games=res.total)
+                print(f"{name:>6} {skill:5d} {res.wins:>3}/{res.draws}/{res.losses:<3} "
+                      f"{res.score:6.3f} {est:7.0f}", flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="checkpoints/p3_80m/best_ema.pt")
+    ap.add_argument("--vs", default=None,
+                    help="second checkpoint for model-vs-model head-to-head")
+    ap.add_argument("--skills", type=int, nargs="+", default=[1, 3])
+    ap.add_argument("--games", type=int, default=12)
+    ap.add_argument("--simulations", type=int, default=100)
+    ap.add_argument("--depth", type=int, default=4)
+    ap.add_argument("--max-moves", type=int, default=200)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--seed", type=int, default=0, help="RNG seed for head-to-head openings")
+    ap.add_argument("--opening-plies", type=int, default=8,
+                    help="random plies to vary head-to-head openings")
+    ap.add_argument("--book", default=None, help="path to a Polyglot .bin opening book")
+    ap.add_argument("--syzygy", default=None, help="path to a Syzygy tablebase directory")
+    ap.add_argument("--max-pieces", type=int, default=5,
+                    help="max men for Syzygy probes (3-4-5 tables -> 5)")
+    ap.add_argument("--tb-one-side", action="store_true",
+                    help="head-to-head: give book/TB to --model only (isolates its edge)")
+    # Per-side search-config A/B (point --model and --vs at the same checkpoint).
+    ap.add_argument("--c-puct", type=float, default=None,
+                    help="head-to-head side A: exploration constant (default: config)")
+    ap.add_argument("--fpu", type=float, default=None,
+                    help="head-to-head side A: first-play-urgency reduction (default: off)")
+    ap.add_argument("--sims-b", type=int, default=None,
+                    help="head-to-head side B (--vs): simulations (default: mirror --simulations)")
+    ap.add_argument("--c-puct-b", type=float, default=None,
+                    help="head-to-head side B: exploration constant (default: mirror --c-puct)")
+    ap.add_argument("--fpu-b", type=float, default=None,
+                    help="head-to-head side B: fpu reduction (default: mirror --fpu)")
+    args = ap.parse_args()
+
+    book, tablebase = _load_book_tb(args)
+
+    if args.vs:
+        run_head_to_head(args.model, args.vs, args.games, args.simulations,
+                         args.device, args.max_moves, seed=args.seed,
+                         opening_plies=args.opening_plies, book=book,
+                         tablebase=tablebase, tb_one_side=args.tb_one_side,
+                         c_puct=args.c_puct, fpu=args.fpu, sims_b=args.sims_b,
+                         c_puct_b=args.c_puct_b, fpu_b=args.fpu_b)
+        return 0
+
+    if not stockfish_available():
+        print("Stockfish not found; cannot run ladder.", file=sys.stderr)
+        return 1
+    run_stockfish_ladder(args.model, args.skills, args.games, args.simulations,
+                         args.depth, args.device, args.max_moves,
+                         book=book, tablebase=tablebase)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

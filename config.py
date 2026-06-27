@@ -34,6 +34,7 @@ class Config:
     # MCTS parameters
     num_simulations = 400  # Simulations per move
     c_puct = 1.5  # Exploration constant
+    fpu_reduction = None  # First-play-urgency reduction (None = off)
     dirichlet_alpha = 0.2  # Noise for root exploration
     dirichlet_epsilon = 0.15  # Weight of noise
     dirichlet_moves = 12  # Add root noise only for first N moves
@@ -108,3 +109,29 @@ class Config:
     main_simulations = 200
     main_games = 100
     refinement_simulations = 400
+
+    # Transformer architecture (Phase 1 rebuild)
+    d_model = 256
+    n_layers = 8
+    n_heads = 8
+    d_ff = 1024
+    smolgen_compress = 32
+    smolgen_hidden = 128
+    smolgen_gen = 128
+    state_dim = 18
+    transformer_dropout = 0.0
+
+    # Phase 2 value head / recipe knobs (defaults preserve baseline-v1)
+    value_head_type = "wdl"      # "wdl" | "hlgauss"
+    value_buckets = 64
+    value_sigma_frac = 0.75      # HL-Gauss sigma as fraction of a bucket width
+    value_loss_weight = 1.0
+    ffn_type = "mlp"             # "mlp" | "swiglu"
+    ema_decay = 0.0              # 0 = off
+
+    # Distillation training (Phase 1)
+    distill_batch_size = 1024
+    distill_lr = 3e-4
+    distill_warmup_steps = 2000
+    distill_total_steps = 60000
+    distill_policy_temperature = 1.0
