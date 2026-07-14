@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-14
 **Status:** approved by user (brainstorming session), pending spec review
-**Working name:** `ferrum` (renameable at repo creation; nothing depends on the name)
+**Working name:** `ferrum` (renameable; nothing depends on the name)
 
 ## 1. Context and decision history
 
@@ -29,8 +29,9 @@ as a position labeler from gen-1 onward.
 
 ## 2. Goal and success metric
 
-**Deliverable:** a UCI chess engine in Rust, in its own repository next to
-chess-rl (`~/Documents/GitHub/ferrum`).
+**Deliverable:** a UCI chess engine in Rust, living in a `ferrum/`
+subdirectory of the chess-rl repository (user decision 2026-07-14: no separate
+repo; the crate is self-contained and touches no existing chess-rl code).
 
 **Success metric:** in blitz gauntlets against a **fixed anchor pool of open
 engines with published CCRL blitz ratings** spanning ~2600–3200 (pinned
@@ -160,8 +161,8 @@ $0.44 — user tops up):
 
 Ops rules (established in prior phases): pull artifacts, then **delete the
 instance the moment a session ends** (TC bills while running); snapshot only
-when state must survive; spend ledger in the ferrum repo updated after every
-session; **hard stop + user alert when cumulative spend crosses $10 and $20**;
+when state must survive; spend ledger at `ferrum/docs/ledger.md` updated after
+every session; **hard stop + user alert when cumulative spend crosses $10 and $20**;
 nothing beyond the approved pot without asking. SPRT compute is the user's
 Mac: $0.
 
@@ -172,8 +173,8 @@ Mac: $0.
 - SPRT tests run as background jobs on the Mac; the agent reports pass/fail
   with Elo estimates.
 - A strength ledger (current anchored rating, spend to date, patch history)
-  lives in the ferrum repo; plain-language status at every milestone and at
-  the $10/$20 spend thresholds.
+  lives at `ferrum/docs/ledger.md`; plain-language status at every milestone
+  and at the $10/$20 spend thresholds.
 
 ## 10. Risks and mitigations
 
@@ -189,10 +190,12 @@ Mac: $0.
 
 ## 11. Relationship to chess-rl
 
-chess-rl remains the data/teacher side: ChessBench tooling, the 77M
-transformer (gen-1+ labeler), Polyglot book and Syzygy integration experience
-(ferrum gets TB probing in M3). No chess-rl code is modified by this project;
-a small export/labeling script may be added to chess-rl when gen-1 starts.
+ferrum lives in a `ferrum/` subdirectory of the chess-rl repository but is a
+self-contained Rust crate. chess-rl remains the data/teacher side: ChessBench
+tooling, the 77M transformer (gen-1+ labeler), Polyglot book and Syzygy
+integration experience (ferrum gets TB probing in M3). No existing chess-rl
+code is modified by this project; a small export/labeling script may be added
+when gen-1 starts.
 
 ## 12. Future work (explicitly out of scope now)
 
