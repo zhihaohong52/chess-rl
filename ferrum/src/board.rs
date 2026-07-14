@@ -63,9 +63,16 @@ impl Board {
         let (mut f, mut r) = (0u8, 7u8);
         for ch in parts[0].chars() {
             match ch {
-                '/' => { f = 0; r -= 1; }
-                '1'..='8' => f += ch as u8 - b'0',
+                '/' => {
+                    if r == 0 { return Err("too many ranks".into()); }
+                    f = 0; r -= 1;
+                }
+                '1'..='8' => {
+                    f += ch as u8 - b'0';
+                    if f > 8 { return Err("rank overflow".into()); }
+                }
                 _ => {
+                    if f >= 8 { return Err("rank overflow".into()); }
                     let c = if ch.is_uppercase() { Color::White } else { Color::Black };
                     let pt = match ch.to_ascii_lowercase() {
                         'p' => PAWN, 'n' => KNIGHT, 'b' => BISHOP,
@@ -78,6 +85,11 @@ impl Board {
                     f += 1;
                 }
             }
+        }
+        if b.bb[pc(Color::White, KING)].count_ones() != 1
+            || b.bb[pc(Color::Black, KING)].count_ones() != 1
+        {
+            return Err("invalid king count".into());
         }
         b.side = if parts[1] == "w" { Color::White } else { Color::Black };
         for ch in parts[2].chars() {
@@ -147,11 +159,34 @@ mod tests {
         assert!(b.attacked(20, Color::White));   // e3 attacked by white pawns
         assert!(!b.attacked(36, Color::White));  // e5 not attacked by white
         assert!(!b.in_check(Color::White));
+        // Re1 vs Ke8 down the open e-file: Black is in check, White is not.
+        let checked = Board::from_fen("4k3/8/8/8/8/8/8/4RK2 b - - 0 1").unwrap();
+        assert!(checked.in_check(Color::Black));
+        assert!(!checked.in_check(Color::White));
     }
     #[test]
     fn hash_differs() {
         let a = Board::from_fen(STARTPOS).unwrap();
         let c = Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
         assert_ne!(a.hash, c.hash);
+        // Castling rights alone must change the hash.
+        let no_castle = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1").unwrap();
+        assert_ne!(a.hash, no_castle.hash);
+        // En-passant square alone must change the hash (black just played d7-d5).
+        let d5 = "rnbqkbnr/ppp1pppp/8/3p4/8/8/PPPPPPPP/RNBQKBNR w KQkq";
+        let with_ep = Board::from_fen(&format!("{d5} d6 0 2")).unwrap();
+        let without_ep = Board::from_fen(&format!("{d5} - 0 2")).unwrap();
+        assert_ne!(with_ep.hash, without_ep.hash);
+    }
+    #[test]
+    fn fen_rejects_malformed() {
+        // 9 ranks: must not underflow the rank counter.
+        assert!(Board::from_fen("8/8/8/8/8/8/8/8/8 w - - 0 1").is_err());
+        // 9 files in a rank: must not shift off the board.
+        assert!(Board::from_fen("rnbqkbnrr/8/8/8/8/8/8/8 w - - 0 1").is_err());
+        // No kings: king_sq/in_check would misbehave downstream.
+        assert!(Board::from_fen("8/8/8/8/8/8/8/8 w - - 0 1").is_err());
+        // Missing side/castling/ep fields.
+        assert!(Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR").is_err());
     }
 }
