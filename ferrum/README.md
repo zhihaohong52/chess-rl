@@ -18,3 +18,12 @@ commands below from `ferrum/`.
 ## Testing
 
     cargo test --release
+
+## Self-play smoke test
+
+Build fastchess, then run ten short self-play games:
+
+    /Users/james/Documents/GitHub/fastchess/fastchess \
+      -engine cmd=./target/release/ferrum name=ferrum1 \
+      -engine cmd=./target/release/ferrum name=ferrum2 \
+      -each tc=8+0.08 -rounds 5 -games 2 -repeat -concurrency 2
