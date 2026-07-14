@@ -5,6 +5,27 @@ use crate::types::{
 };
 use crate::zobrist::z;
 
+/// Which castling rights survive a move touching this square.
+/// Rights bits: WK=1 WQ=2 BK=4 BQ=8. a1=WQ rook, h1=WK rook, e1=W king, mirrored for black.
+const CASTLE_MASK: [u8; 64] = {
+    let mut m = [15u8; 64];
+    m[0] = 15 - 2;   // a1
+    m[7] = 15 - 1;   // h1
+    m[4] = 15 - 3;   // e1
+    m[56] = 15 - 8;  // a8
+    m[63] = 15 - 4;  // h8
+    m[60] = 15 - 12; // e8
+    m
+};
+
+pub struct Undo {
+    captured: Option<usize>,
+    castling: u8,
+    ep: Option<u8>,
+    halfmove: u16,
+    hash: u64,
+}
+
 #[derive(Clone)]
 pub struct Board {
     pub bb: [Bb; 12],
@@ -134,6 +155,105 @@ impl Board {
         match self.ep { Some(e) => s.push_str(&sq_name(e)), None => s.push('-') }
         s.push_str(&format!(" {} {}", self.halfmove, self.fullmove));
         s
+    }
+
+    fn move_piece(&mut self, p: usize, from: u8, to: u8) {
+        let zb = z();
+        self.bb[p] ^= bb(from) | bb(to);
+        self.occ[p / 6] ^= bb(from) | bb(to);
+        self.hash ^= zb.piece[p][from as usize] ^ zb.piece[p][to as usize];
+    }
+    fn toggle_piece(&mut self, p: usize, s: u8) {
+        self.bb[p] ^= bb(s);
+        self.occ[p / 6] ^= bb(s);
+        self.hash ^= z().piece[p][s as usize];
+    }
+
+    pub fn make(&mut self, m: crate::moves::Move) -> Undo {
+        use crate::moves::*;
+        let zb = z();
+        let us = self.side;
+        let mut undo = Undo {
+            captured: None, castling: self.castling, ep: self.ep,
+            halfmove: self.halfmove, hash: self.hash,
+        };
+        let (from, to, flags) = (m.from(), m.to(), m.flags());
+        let piece = self.piece_on(from).expect("no piece on from-square");
+
+        // clear old ep from hash; new ep set below if DPP
+        if let Some(e) = self.ep { self.hash ^= zb.ep_file[file_of(e) as usize]; }
+        self.ep = None;
+        self.halfmove += 1;
+        if piece % 6 == PAWN { self.halfmove = 0; }
+
+        if m.is_capture() {
+            let cap_sq = if flags == FLAG_EP {
+                if us == Color::White { to - 8 } else { to + 8 }
+            } else { to };
+            let cap = self.piece_on(cap_sq).expect("no captured piece");
+            self.toggle_piece(cap, cap_sq);
+            undo.captured = Some(cap);
+            self.halfmove = 0;
+        }
+
+        self.move_piece(piece, from, to);
+
+        if m.is_promo() {
+            self.toggle_piece(piece, to);                       // remove pawn
+            self.toggle_piece(pc(us, m.promo_pt()), to);        // drop promo piece
+        } else if flags == FLAG_OO {
+            let (rf, rt) = if us == Color::White { (7, 5) } else { (63, 61) };
+            self.move_piece(pc(us, ROOK), rf, rt);
+        } else if flags == FLAG_OOO {
+            let (rf, rt) = if us == Color::White { (0, 3) } else { (56, 59) };
+            self.move_piece(pc(us, ROOK), rf, rt);
+        } else if flags == FLAG_DPP {
+            let ep = if us == Color::White { from + 8 } else { from - 8 };
+            self.ep = Some(ep);
+            self.hash ^= zb.ep_file[file_of(ep) as usize];
+        }
+
+        self.hash ^= zb.castling[self.castling as usize];
+        self.castling &= CASTLE_MASK[from as usize] & CASTLE_MASK[to as usize];
+        self.hash ^= zb.castling[self.castling as usize];
+
+        if us == Color::Black { self.fullmove += 1; }
+        self.side = us.flip();
+        self.hash ^= zb.side;
+        undo
+    }
+
+    pub fn unmake(&mut self, m: crate::moves::Move, u: Undo) {
+        use crate::moves::*;
+        let us = self.side.flip(); // the side that made the move
+        let (from, to, flags) = (m.from(), m.to(), m.flags());
+
+        if m.is_promo() {
+            self.toggle_piece(pc(us, m.promo_pt()), to);
+            self.toggle_piece(pc(us, PAWN), to);
+        }
+        let piece = self.piece_on(to).expect("no piece on to-square");
+        self.move_piece(piece, to, from);
+
+        if flags == FLAG_OO {
+            let (rf, rt) = if us == Color::White { (7, 5) } else { (63, 61) };
+            self.move_piece(pc(us, ROOK), rt, rf);
+        } else if flags == FLAG_OOO {
+            let (rf, rt) = if us == Color::White { (0, 3) } else { (56, 59) };
+            self.move_piece(pc(us, ROOK), rt, rf);
+        }
+        if let Some(cap) = u.captured {
+            let cap_sq = if flags == FLAG_EP {
+                if us == Color::White { to - 8 } else { to + 8 }
+            } else { to };
+            self.toggle_piece(cap, cap_sq);
+        }
+        if us == Color::Black { self.fullmove -= 1; }
+        self.side = us;
+        self.castling = u.castling;
+        self.ep = u.ep;
+        self.halfmove = u.halfmove;
+        self.hash = u.hash; // full restore — no incremental unmake hashing needed
     }
 }
 

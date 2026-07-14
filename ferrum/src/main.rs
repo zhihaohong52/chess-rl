@@ -6,6 +6,10 @@ mod attacks;
 mod zobrist;
 #[allow(dead_code)]
 mod board;
+#[allow(dead_code)]
+mod moves;
+#[allow(dead_code)]
+mod movegen;
 
 fn main() {
     println!("ferrum 0.1.0-dev");
