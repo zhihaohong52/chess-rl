@@ -61,7 +61,7 @@ impl Board {
 
     pub fn in_check(&self, c: Color) -> bool { self.attacked(self.king_sq(c), c.flip()) }
 
-    fn compute_hash(&self) -> u64 {
+    pub(crate) fn compute_hash(&self) -> u64 {
         let zb = z();
         let mut h = 0u64;
         for p in 0..12 {
@@ -111,6 +111,12 @@ impl Board {
             || b.bb[pc(Color::Black, KING)].count_ones() != 1
         {
             return Err("invalid king count".into());
+        }
+        // Pawns on ranks 1/8 would panic movegen in debug (square arithmetic
+        // off the board) or silently corrupt the Move encoding in release.
+        const BACK_RANKS: Bb = 0xFF00_0000_0000_00FF;
+        if (b.bb[pc(Color::White, PAWN)] | b.bb[pc(Color::Black, PAWN)]) & BACK_RANKS != 0 {
+            return Err("pawn on back rank".into());
         }
         b.side = if parts[1] == "w" { Color::White } else { Color::Black };
         for ch in parts[2].chars() {
@@ -308,5 +314,14 @@ mod tests {
         assert!(Board::from_fen("8/8/8/8/8/8/8/8 w - - 0 1").is_err());
         // Missing side/castling/ep fields.
         assert!(Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR").is_err());
+    }
+    #[test]
+    fn fen_rejects_back_rank_pawns() {
+        // White pawn on e8 (kings a1/h8, non-adjacent).
+        assert!(Board::from_fen("4P2k/8/8/8/8/8/8/K7 w - - 0 1").is_err());
+        // Black pawn on e1 (kings a1/h8, non-adjacent).
+        assert!(Board::from_fen("7k/8/8/8/8/8/8/K3p3 w - - 0 1").is_err());
+        // Control: same material one rank inward parses fine.
+        assert!(Board::from_fen("7k/4P3/8/8/8/8/4p3/K7 w - - 0 1").is_ok());
     }
 }

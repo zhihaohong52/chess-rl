@@ -132,6 +132,32 @@ mod tests {
         // en passant is generated and legal
         assert_eq!(count_legal("8/8/8/2pP4/8/8/8/k6K w - c6 0 1"), 2 + 3);      // d6 push, dxc6 ep + 3 king moves
     }
+    /// Depth-limited walk asserting the incrementally-maintained hash always
+    /// matches a from-scratch recompute after every legal make.
+    fn assert_hash_incremental(b: &mut Board, depth: u32) {
+        let mut ms = Vec::new();
+        generate(b, &mut ms);
+        for m in ms {
+            let u = b.make(m);
+            if !b.in_check(b.side.flip()) {
+                assert_eq!(b.hash, b.compute_hash(), "incremental hash diverged after {}", m.uci());
+                if depth > 1 { assert_hash_incremental(b, depth - 1); }
+            }
+            b.unmake(m, u);
+        }
+    }
+
+    #[test]
+    fn hash_incremental_matches_recompute() {
+        for fen in [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/8/8/2pP4/8/8/8/k6K w - c6 0 1",
+        ] {
+            let mut b = Board::from_fen(fen).unwrap();
+            assert_hash_incremental(&mut b, 2);
+        }
+    }
+
     #[test]
     fn make_unmake_restores_everything() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
