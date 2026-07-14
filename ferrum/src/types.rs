@@ -21,8 +21,11 @@ pub const KING: usize = 5;
 pub fn pc(c: Color, pt: usize) -> usize { c.idx() * 6 + pt }
 
 pub fn bb(sq: u8) -> Bb { 1u64 << sq }
+/// Precondition: `b != 0` — on an empty bitboard this returns the bogus index 64; callers must guard.
 pub fn lsb(b: Bb) -> u8 { b.trailing_zeros() as u8 }
+/// Precondition: `b != 0` — on an empty bitboard this panics in debug (underflow) and returns the bogus index 255 in release; callers must guard.
 pub fn msb(b: Bb) -> u8 { 63 - b.leading_zeros() as u8 }
+/// Precondition: `*b != 0` — on an empty bitboard this panics in debug (underflow) and returns the bogus index 64 in release; callers must guard.
 pub fn pop_lsb(b: &mut Bb) -> u8 { let s = lsb(*b); *b &= *b - 1; s }
 pub fn file_of(sq: u8) -> u8 { sq & 7 }
 pub fn rank_of(sq: u8) -> u8 { sq >> 3 }
@@ -54,6 +57,11 @@ mod tests {
         assert_eq!(sq_name(36), "e5");
         assert_eq!(parse_sq("e5"), Some(36));
         assert_eq!(parse_sq("i9"), None);
+        assert_eq!(parse_sq(""), None);
+        assert_eq!(parse_sq("e"), None);
+        assert_eq!(parse_sq("e55"), None);
+        assert_eq!(parse_sq("a9"), None);
+        assert_eq!(parse_sq("i1"), None);
     }
     #[test]
     fn bitboard_ops() {
@@ -62,10 +70,13 @@ mod tests {
         assert_eq!(pop_lsb(&mut b), 0);
         assert_eq!(pop_lsb(&mut b), 63);
         assert_eq!(b, 0);
+        assert_eq!(msb(bb(0) | bb(63)), 63);
+        assert_eq!(msb(bb(5)), 5);
     }
     #[test]
     fn piece_index() {
         assert_eq!(pc(Color::White, PAWN), 0);
+        assert_eq!(pc(Color::Black, PAWN), 6);
         assert_eq!(pc(Color::Black, KING), 11);
         assert_eq!(Color::White.flip(), Color::Black);
     }
