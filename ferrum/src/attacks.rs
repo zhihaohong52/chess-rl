@@ -53,8 +53,10 @@ pub fn knight_attacks(s: u8) -> Bb { tables().knight[s as usize] }
 pub fn king_attacks(s: u8) -> Bb { tables().king[s as usize] }
 pub fn pawn_attacks(c: Color, s: u8) -> Bb { tables().pawn[c.idx()][s as usize] }
 
-fn ray_attack(dir: usize, s: u8, occ: Bb) -> Bb {
-    let t = tables();
+/// Attacks along one ray direction from `s`, cut at the first blocker in `occ`.
+/// `occ` must be the union of ALL pieces (both colors). The returned set INCLUDES
+/// the nearest blocker's square whether friend or enemy.
+fn ray_attack(t: &Tables, dir: usize, s: u8, occ: Bb) -> Bb {
     let ray = t.rays[dir][s as usize];
     let blockers = ray & occ;
     if blockers == 0 { return ray; }
@@ -62,12 +64,22 @@ fn ray_attack(dir: usize, s: u8, occ: Bb) -> Bb {
     ray ^ t.rays[dir][blocker as usize]
 }
 
+/// Rook attacks from `s`. `occ` must be the union of ALL pieces (both colors);
+/// the result INCLUDES the nearest blocker's square whether friend or enemy,
+/// so callers must mask out own pieces for move generation.
 pub fn rook_attacks(s: u8, occ: Bb) -> Bb {
-    ray_attack(0, s, occ) | ray_attack(1, s, occ) | ray_attack(2, s, occ) | ray_attack(3, s, occ)
+    let t = tables();
+    ray_attack(t, 0, s, occ) | ray_attack(t, 1, s, occ) | ray_attack(t, 2, s, occ) | ray_attack(t, 3, s, occ)
 }
+/// Bishop attacks from `s`. `occ` must be the union of ALL pieces (both colors);
+/// the result INCLUDES the nearest blocker's square whether friend or enemy,
+/// so callers must mask out own pieces for move generation.
 pub fn bishop_attacks(s: u8, occ: Bb) -> Bb {
-    ray_attack(4, s, occ) | ray_attack(5, s, occ) | ray_attack(6, s, occ) | ray_attack(7, s, occ)
+    let t = tables();
+    ray_attack(t, 4, s, occ) | ray_attack(t, 5, s, occ) | ray_attack(t, 6, s, occ) | ray_attack(t, 7, s, occ)
 }
+/// Queen attacks from `s`. Same `occ` contract as `rook_attacks`/`bishop_attacks`:
+/// `occ` is the union of ALL pieces; the result includes the nearest blockers.
 pub fn queen_attacks(s: u8, occ: Bb) -> Bb { rook_attacks(s, occ) | bishop_attacks(s, occ) }
 
 #[cfg(test)]
@@ -91,5 +103,13 @@ mod tests {
         let a = bishop_attacks(27, bb(45));
         assert!(a & bb(45) != 0 && a & bb(54) == 0);             // hits f6, not g7
         assert_eq!(queen_attacks(27, 0).count_ones(), 27);       // d4, empty board
+        // Negative-direction (msb) branch coverage:
+        // rook h8, blocker h6: south ray cut (h7,h6) + west ray full (g8..a8) = 9
+        assert_eq!(rook_attacks(63, bb(47)).count_ones(), 9);
+        // bishop d4, blocker b2: SW ray hits b2, not a1
+        let a = bishop_attacks(27, bb(9));
+        assert!(a & bb(9) != 0 && a & bb(0) == 0);
+        // rook e4 blocked e2(south) & e6(north): 4 vertical + 7 horizontal = 11
+        assert_eq!(rook_attacks(28, bb(12) | bb(44)).count_ones(), 11);
     }
 }
