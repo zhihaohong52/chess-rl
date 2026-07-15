@@ -5,6 +5,13 @@ anchored gauntlet. `bin/` is gitignored: built engine and Ordo binaries never
 belong in git. This README, rather than checked-in binaries, is the source of
 truth for rebuilding the pool.
 
+From this directory, create the gitignored binary output directory before
+building any anchors:
+
+```bash
+mkdir -p bin
+```
+
 The ratings below are the published single-CPU values from the
 [CCRL 40/4 (Blitz) all-engines list](https://www.computerchess.org.uk/ccrl/404/rating_list_all.html),
 captured on 2026-07-16 from the list whose last games were added on 2026-07-11.

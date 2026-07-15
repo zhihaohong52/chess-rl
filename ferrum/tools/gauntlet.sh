@@ -9,7 +9,7 @@ FASTCHESS="${FASTCHESS:-/Users/james/Documents/GitHub/fastchess/fastchess}"
 BOOK="${BOOK:-$FERRUM_DIR/books/openings_m1.epd}"
 BIN="$FERRUM_DIR/bench/anchors/bin"
 TC="${TC:-8+0.08}"
-ROUNDS="${ROUNDS:-120}"          # per opponent, paired
+ROUNDS="${ROUNDS:-140}"          # per opponent, paired; 4 anchors => 1,120 games
 CONCURRENCY="${CONCURRENCY:-4}"
 FERRUM="${1:-$FERRUM_DIR/target/release/ferrum}"
 
