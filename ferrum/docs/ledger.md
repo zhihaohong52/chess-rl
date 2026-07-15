@@ -8,7 +8,7 @@ are anchored-match results; internal metrics (bench, perft) track regressions.
 | date | version | bench (nodes) | tests | result |
 |---|---|---|---|---|
 | 2026-07-15 | M0 (v0.1.0) | 6,009,132 | 25 + deep perft | 100g vs Stockfish UCI_Elo=2000, 8+0.08, 24-opening book → **40.5%** (35W/54L/11D), Elo −66.8 ± 68.7 → est ~1930 |
-| 2026-07-16 | M1 Task 4 (magic bitboards) — rejected/reverted | 6,009,132 | correctness passed | Warmed paired median **+4.45%**, ratio 1.0445 (95% CI 1.0276–1.0649); failed frozen ≥10% gate; profiling put theoretical maximum below 10%; SPRT not run; ray-scan source restored |
+| 2026-07-16 | M1 Task 4 (magic bitboards) — rejected/reverted | 6,009,132 | candidate 27 pass; restored 25 pass/1 ignored | Warmed paired median **+4.45%**, ratio 1.0445 (95% CI 1.0276–1.0649); failed frozen ≥10% gate; profiling put theoretical maximum below 10%; SPRT not run; ray-scan source restored |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -23,7 +23,10 @@ of at least 10%. Profiling an exact benchmark attack trace measured a 1.953x
 slider-kernel speedup but only about 5.45–8.73% of baseline work in ray scans,
 placing the theoretical whole-engine maximum below 10% on the Apple ARM host.
 The materiality gate therefore rejected the feature before SPRT. The magic
-source was reverted to the pre-experiment ray-scan implementation. Cost: **$0**.
+source was reverted to the pre-experiment ray-scan implementation. Candidate
+verification finished with 27 passing tests (including UCI smoke), plus the
+ignored deep-perft run. The restored baseline finished with 25 passing tests,
+one ignored, and clean all-target release clippy. Cost: **$0**.
 
 ## M0 exit — PASSED
 
@@ -67,6 +70,9 @@ A6000). Hard alerts at $10 and $20 cumulative.
 
 ## Next (M1)
 
-Search-feature SPRT grind (null-move, LMR, aspiration windows, better time
-management), magic bitboards, and the CCRL-anchored gauntlet for the first
-honest absolute rating. Target: ~2300–2500.
+Runtime-found magic bitboards were evaluated in Task 4 and rejected/reverted on
+this Apple ARM host under the frozen performance gate. Active M1 work resumes
+with Task 5/PVS, followed by the remaining search stack (null-move, LMR,
+aspiration windows, and better time management) and the CCRL-anchored gauntlet
+for the first honest absolute rating. No magic retry is planned; any future
+compact redesign requires separate approval. Target: ~2300–2500.
