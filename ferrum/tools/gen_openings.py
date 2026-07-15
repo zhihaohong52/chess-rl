@@ -7,7 +7,7 @@ plies deep (balanced, non-blundering positions) as an EPD book for fastchess:
 
     fastchess ... -openings file=books/openings.epd format=epd order=random
 
-Regenerate: `python3 tools/gen_openings.py > books/openings.epd`
+Regenerate: `python3 tools/gen_openings.py > books/openings_m1.epd`
 Requires python-chess (`pip install chess`).
 """
 import sys
@@ -43,19 +43,37 @@ OPENINGS = [
 ]
 
 
+def _expand(board: chess.Board, plies_left: int, seen: set, out: list, max_per_seed: int):
+    """Depth-first walk emitting EPDs, at most `max_per_seed` per seed line."""
+    if len(out) and out.count(out[-1]):  # cheap guard; real dedupe via `seen`
+        pass
+    epd = board.epd()
+    if epd not in seen:
+        seen.add(epd)
+        out.append(epd)
+    if plies_left == 0 or len(out) >= max_per_seed:
+        return
+    # branch on a handful of reasonable legal moves (keep the tree small + sane)
+    legal = list(board.legal_moves)
+    for mv in legal[: min(3, len(legal))]:
+        board.push(mv)
+        _expand(board, plies_left - 1, seen, out, max_per_seed)
+        board.pop()
+
+
 def main() -> int:
-    seen = set()
+    seen: set = set()
+    all_epds: list = []
     for line in OPENINGS:
         board = chess.Board()
         for san in line.split():
             board.push_san(san)
-        epd = board.epd()
-        if epd in seen:
-            print(f"warning: duplicate position from '{line}'", file=sys.stderr)
-            continue
-        seen.add(epd)
+        per_seed: list = []
+        _expand(board, 2, seen, per_seed, max_per_seed=40)
+        all_epds.extend(per_seed)
+    for epd in all_epds:
         print(epd)
-    print(f"generated {len(seen)} opening positions", file=sys.stderr)
+    print(f"generated {len(all_epds)} opening positions", file=sys.stderr)
     return 0
 
 
