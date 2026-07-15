@@ -2,10 +2,10 @@
 """Generate a small EPD opening book of standard, sound openings.
 
 Deterministic engines play identical games from the start position, so
-strength matches need opening variety. This emits ~24 mainline openings a few
-plies deep (balanced, non-blundering positions) as an EPD book for fastchess:
+strength matches need opening variety. This emits deterministic, shallow legal
+variations from seeded mainlines as an EPD book for fastchess:
 
-    fastchess ... -openings file=books/openings.epd format=epd order=random
+    fastchess ... -openings file=books/openings_m1.epd format=epd order=random
 
 Regenerate: `python3 tools/gen_openings.py > books/openings_m1.epd`
 Requires python-chess (`pip install chess`).
@@ -45,8 +45,6 @@ OPENINGS = [
 
 def _expand(board: chess.Board, plies_left: int, seen: set, out: list, max_per_seed: int):
     """Depth-first walk emitting EPDs, at most `max_per_seed` per seed line."""
-    if len(out) and out.count(out[-1]):  # cheap guard; real dedupe via `seen`
-        pass
     epd = board.epd()
     if epd not in seen:
         seen.add(epd)
