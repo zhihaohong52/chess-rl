@@ -8,6 +8,22 @@ are anchored-match results; internal metrics (bench, perft) track regressions.
 | date | version | bench (nodes) | tests | result |
 |---|---|---|---|---|
 | 2026-07-15 | M0 (v0.1.0) | 6,009,132 | 25 + deep perft | 100g vs Stockfish UCI_Elo=2000, 8+0.08, 24-opening book → **40.5%** (35W/54L/11D), Elo −66.8 ± 68.7 → est ~1930 |
+| 2026-07-16 | M1 Task 4 (magic bitboards) — rejected/reverted | 6,009,132 | correctness passed | Warmed paired median **+4.45%**, ratio 1.0445 (95% CI 1.0276–1.0649); failed frozen ≥10% gate; profiling put theoretical maximum below 10%; SPRT not run; ray-scan source restored |
+
+## M1 Task 4 — REJECTED / REVERTED
+
+The runtime-found fancy-magic implementation preserved exact move-generation
+correctness and the 6,009,132-node bench workload, but did not clear its frozen
+performance gate. Fifteen warmed alternating baseline/candidate pairs measured
+a median candidate uplift of **+4.45%**, with the 95% confidence interval for
+the paired candidate/baseline ratio wholly positive at **1.0276–1.0649**.
+
+The acceptance bar required both a ratio CI wholly above 1.00 and median uplift
+of at least 10%. Profiling an exact benchmark attack trace measured a 1.953x
+slider-kernel speedup but only about 5.45–8.73% of baseline work in ray scans,
+placing the theoretical whole-engine maximum below 10% on the Apple ARM host.
+The materiality gate therefore rejected the feature before SPRT. The magic
+source was reverted to the pre-experiment ray-scan implementation. Cost: **$0**.
 
 ## M0 exit — PASSED
 
@@ -34,6 +50,7 @@ that is the number the 3000+ goal is measured against.
 | date | item | cost | cumulative |
 |---|---|---|---|
 | — | M0 is local-only (Mac); no ThunderCompute spend | $0.00 | $0.00 |
+| 2026-07-16 | M1 Task 4 local magic-bitboard experiment (rejected) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
