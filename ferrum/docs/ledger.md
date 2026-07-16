@@ -1,7 +1,8 @@
 # ferrum ledger
 
-Strength, spend, and milestone history. The only numbers reported as "Elo"
-are anchored-match results; internal metrics (bench, perft) track regressions.
+Strength, spend, and milestone history. Absolute Elo claims are reported only
+from anchored matches; per-patch self-play results are labeled SPRT Delta-Elo
+estimates. Internal metrics (bench, perft) track regressions.
 
 ## Milestones
 
@@ -9,7 +10,7 @@ are anchored-match results; internal metrics (bench, perft) track regressions.
 |---|---|---|---|---|
 | 2026-07-15 | M0 (v0.1.0) | 6,009,132 | 25 + deep perft | 100g vs Stockfish UCI_Elo=2000, 8+0.08, 24-opening book → **40.5%** (35W/54L/11D), Elo −66.8 ± 68.7 → est ~1930 |
 | 2026-07-16 | M1 Task 4 (magic bitboards) — rejected/reverted | 6,009,132 | candidate 27 pass; restored 25 pass/1 ignored | Warmed paired median **+4.45%**, ratio 1.0445 (95% CI 1.0276–1.0649); failed frozen ≥10% gate; profiling put theoretical maximum below 10%; SPRT not run; ray-scan source restored |
-| 2026-07-17 | M1 Task 5 (PVS) — rejected/reverted | candidate 4,500,816 / restored 6,009,132 (−25.10%) | candidate focused 4 pass/23 filtered; full 26 pass/1 ignored; restored 25 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 243W/226L/1531D, Elo +2.95 ± 6.04 (95% CI [−3.09, +8.99]), LLR +0.46; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
+| 2026-07-17 | M1 Task 5 (PVS) — rejected/reverted | candidate 4,500,816 / restored 6,009,132 (−25.10%) | candidate focused 4 pass/23 filtered; full 26 pass/1 ignored; restored 25 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 243W/226L/1531D, SPRT Delta-Elo +2.95 ± 6.04 (95% CI [−3.09, +8.99]), LLR +0.46; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -39,11 +40,12 @@ with `uciok`, `readyok`, and legal `bestmove b1c3`. Its bench result was
 **6,009,132-node** baseline; recorded candidate throughput was 2,751,612 NPS.
 
 The definitive, unpooled 2,000-game fastchess SPRT at 8+0.08 finished
-normally after 02:29:56 with **243W/226L/1531D**, Elo **+2.95 ± 6.04**, and
-95% CI **[−3.09, +8.99]**. Its LLR **+0.46** remained inside the
-**(−2.94, +2.94)** boundaries, so neither boundary was reached. At the cap,
-acceptance required an Elo confidence interval wholly above zero; this interval
-crosses zero. There was therefore **no SPRT acceptance**. The log recorded no
+normally after 02:29:56 with **243W/226L/1531D**, relative SPRT Delta-Elo
+**+2.95 ± 6.04**, and 95% CI **[−3.09, +8.99]**. Its LLR **+0.46** remained
+inside the **(−2.94, +2.94)** boundaries, so neither boundary was reached. At
+the cap, acceptance required a SPRT Delta-Elo confidence interval wholly above
+zero; this interval crosses zero. There was therefore **no SPRT acceptance**.
+The log recorded no
 crash, illegal move, disconnect, or error. The earlier interrupted 103-game
 run was not pooled.
 
@@ -100,11 +102,12 @@ A6000). Hard alerts at $10 and $20 cumulative.
 ## Next (M1)
 
 Runtime-found magic bitboards (Task 4) and PVS (Task 5) were rejected and
-reverted under their frozen gates. **Task 6, aspiration windows, is active.**
-PVS is absent from the restored engine. Later work may carry forward only a
-semantics-neutral, readable negamax rewrite when needed by a separately
-specified feature; it must not reintroduce the rejected PVS behavior without a
-new approved experiment and acceptance criterion. The remaining search stack is
+reverted under their frozen gates. **Task 6, aspiration windows, is the next
+planned task once Task 5 review closes.** PVS is absent from the restored
+engine. Later work may include a semantics-neutral, readable-negamax
+restructuring only as part of a separately gated later experiment; it must not
+reintroduce the rejected PVS behavior without a new approved experiment and
+acceptance criterion. The remaining search stack is
 null-move, LMR, aspiration windows, and better time management, followed by the
 CCRL-anchored gauntlet for the first honest absolute rating. No magic retry is
 planned; any future compact redesign requires separate approval. Target:
