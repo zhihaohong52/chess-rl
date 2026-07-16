@@ -12,6 +12,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-16 | M1 Task 4 (magic bitboards) — rejected/reverted | 6,009,132 | candidate 27 pass; restored 25 pass/1 ignored | Warmed paired median **+4.45%**, ratio 1.0445 (95% CI 1.0276–1.0649); failed frozen ≥10% gate; profiling put theoretical maximum below 10%; SPRT not run; ray-scan source restored |
 | 2026-07-17 | M1 Task 5 (PVS) — rejected/reverted | candidate 4,500,816 / restored 6,009,132 (−25.10%) | candidate focused 4 pass/23 filtered; full 26 pass/1 ignored; restored 25 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 243W/226L/1531D, SPRT Delta-Elo +2.95 ± 6.04 (95% CI [−3.09, +8.99]), LLR +0.46; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
 | 2026-07-17 | M1 Task 6 (aspiration windows) — accepted | baseline 6,009,132 / candidate 5,612,148 (−6.61%) | focused 2 pass/26 filtered; full search 5 pass/23 filtered; release 27 pass/1 ignored; deep perft; clippy clean | definitive 2,000-game SPRT: 279W/239L/1482D, relative Delta-Elo +6.95 ± 5.86 (95% CI [+1.09, +12.81]), LLR +1.86 inside boundaries; cap acceptance because CI is wholly positive; source retained |
+| 2026-07-17 | M1 Task 7 (killer moves) — accepted | baseline 5,612,148 / candidate 3,166,392 (−43.58%) | focused 1+1 pass/31 filtered each; full search 9 pass/23 filtered; release 31 pass/1 ignored; deep perft; clippy clean | H1 accepted after 992 games: 160W/93L/739D, relative Delta-Elo +23.50 ± 10.09, LLR +2.98 crossed +2.94; source retained |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -89,6 +90,37 @@ full-window negamax restructuring is retained as part of this accepted
 aspiration patch; it does not introduce a first-move or null-window search.
 Cost: **$0**.
 
+## M1 Task 7 — ACCEPTED
+
+Task 7 retains bounded killer-move storage and normal-negamax ordering. The
+frozen benchmark comparison is **5,612,148 nodes / 3,172,643 NPS** for the
+baseline and **3,166,392 nodes / 2,936,389 NPS** for the candidate: 2,445,756
+fewer nodes (**−43.58%**). A fresh finalizer re-bench reproduced 3,166,392
+nodes at 2,837,648 NPS; NPS is timing-dependent and is not an Elo claim.
+
+Validation was exact: `killer_stored_and_deduped` and
+`move_ordering_has_exact_killer_precedence` each had **1 passed, 31 filtered**;
+the complete search set had **9 passed, 23 filtered**; `cargo test --release`
+had **31 passed, 0 failed, 1 ignored**; all-target release clippy with
+`-D warnings` was clean; ignored `perft_deep` was **1 passed, 31 filtered**;
+and live release `perft 6` produced **119,060,324**. The UCI smoke returned
+`uciok`, `readyok`, and legal `bestmove b1c3`; `git diff --check` was clean.
+
+The definitive normalized fastchess SPRT at 8+0.08 ended normally after
+01:14:15 when **H1 was accepted**. It contains **992 games: 160W/93L/739D**
+for candidate versus baseline, relative self-play SPRT Delta-Elo **+23.50 ±
+10.09**, and LLR **+2.98**, crossing the **+2.94** upper boundary. This is a
+relative self-play development estimate, not an absolute anchored Elo. The
+definitive log has exactly one `Finished match` and no error, illegal-move,
+disconnect, crash, killed, or failed entry. Its 2,412,598-byte PGN independently
+has all 992 games and 992 unique `(Round, White, Black)` identities, with the
+same candidate W/L/D accounting.
+
+The accepted source is retained. Killers reset once at `think` entry and persist
+across aspiration retries and iterative depths within that think. qsearch
+remains killer-free, using its existing free capture ordering; PVS, first-move,
+null-window, and re-search behavior remain absent. Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -117,6 +149,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-16 | M1 Task 4 local magic-bitboard experiment (rejected) | $0.00 | $0.00 |
 | 2026-07-17 | M1 Task 5 local PVS experiment (rejected/reverted) | $0.00 | $0.00 |
 | 2026-07-17 | M1 Task 6 local aspiration-window experiment (accepted) | $0.00 | $0.00 |
+| 2026-07-17 | M1 Task 7 local killer-move experiment (accepted) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -134,10 +167,10 @@ A6000). Hard alerts at $10 and $20 cumulative.
 ## Next (M1)
 
 Runtime-found magic bitboards (Task 4) and PVS (Task 5) remain rejected and
-reverted under their frozen gates. **Task 6, aspiration windows, is accepted**:
-its readable full-window negamax restructuring is retained with the patch, and
-PVS remains absent. **Task 7, killer moves, is the next planned task after Task
-6 review closure.** The remaining search stack is null-move, LMR, and better
-time management, followed by the CCRL-anchored gauntlet for the first honest
-absolute rating. No magic retry is planned; any future compact redesign
-requires separate approval. Target: ~2300–2500.
+reverted under their frozen gates. **Task 6, aspiration windows, and Task 7,
+killer moves, are accepted and retained**; PVS remains absent. **Task 8,
+history heuristic, is next after Task 7 review closure.** The remaining search
+stack is null-move, LMR, and better time management, followed by the
+CCRL-anchored gauntlet for the first honest absolute rating. No magic retry is
+planned; any future compact redesign requires separate approval. Target:
+~2300–2500.

@@ -2,6 +2,7 @@ use crate::{board::Board, eval::{Eval, Hce, MATERIAL}, movegen::generate, moves:
 use std::time::{Duration, Instant};
 pub const MATE: i32 = 30_000;
 const MATE_BOUND: i32 = MATE - 1_000;
+const MAX_PLY: usize = 128;
 
 #[cfg(test)]
 std::thread_local! {
@@ -18,9 +19,9 @@ fn aspiration_retries() -> u32 {
     ASPIRATION_RETRIES.with(std::cell::Cell::get)
 }
 #[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
-pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, eval: Hce }
+pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: Hce }
 impl Searcher {
-    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), eval:Hce } }
+    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:Hce } }
     pub fn node_count(&self) -> u64 { self.nodes }
     pub fn think(
         &mut self,
@@ -29,6 +30,7 @@ impl Searcher {
         history: &[u64],
     ) -> Move {
         self.nodes = 0;
+        self.killers = [[Move::NONE; 2]; MAX_PLY];
         self.stopped = false;
         self.history = history.to_vec();
         self.deadline = deadline(board, limits);
@@ -101,6 +103,33 @@ impl Searcher {
     fn timed_out(&mut self) -> bool { if self.nodes & 2047 == 0 { if self.deadline.is_some_and(|d| Instant::now() >= d) { self.stopped=true; } } self.stopped }
     fn repeated(&self, hash:u64)->bool { self.history.iter().rev().skip(1).step_by(2).any(|&h|h==hash) }
 
+    fn store_killer(&mut self, ply: i32, m: Move) {
+        let p = (ply as usize).min(MAX_PLY - 1);
+        if self.killers[p][0] != m {
+            self.killers[p][1] = self.killers[p][0];
+            self.killers[p][0] = m;
+        }
+    }
+
+    fn order_moves(&self, b: &Board, moves: &mut [Move], tt: Move, ply: i32) {
+        let p = (ply as usize).min(MAX_PLY - 1);
+        moves.sort_by_key(|m| {
+            if *m == tt {
+                -2_000_000
+            } else if m.is_capture() {
+                let victim = b.piece_on(m.to()).map(|piece| MATERIAL[piece % 6]).unwrap_or(100);
+                let attacker = b.piece_on(m.from()).map(|piece| MATERIAL[piece % 6]).unwrap_or(0);
+                -(1_000_000 + victim * 10 - attacker)
+            } else if m.is_promo() {
+                -900_000
+            } else if *m == self.killers[p][0] || *m == self.killers[p][1] {
+                -800_000
+            } else {
+                0
+            }
+        });
+    }
+
     fn negamax(
         &mut self,
         b: &mut Board,
@@ -115,6 +144,9 @@ impl Searcher {
         }
         if ply > 0 && (b.halfmove >= 100 || self.repeated(b.hash)) {
             return 0;
+        }
+        if ply >= MAX_PLY as i32 {
+            return self.qsearch(b, alpha, beta);
         }
         if depth <= 0 {
             return self.qsearch(b, alpha, beta);
@@ -137,7 +169,7 @@ impl Searcher {
 
         let mut moves = Vec::with_capacity(64);
         generate(b, &mut moves);
-        order(b, &mut moves, tt_move);
+        self.order_moves(b, &mut moves, tt_move, ply);
 
         let mut legal = 0;
         let mut best = -MATE - 1;
@@ -163,6 +195,9 @@ impl Searcher {
             if score > alpha {
                 alpha = score;
                 if alpha >= beta {
+                    if !m.is_capture() && !m.is_promo() {
+                        self.store_killer(ply, m);
+                    }
                     break;
                 }
             }
@@ -278,5 +313,36 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(actual, MATE - 1);
         assert!(aspiration_retries() > 0);
+    }
+
+    #[test]
+    fn killer_stored_and_deduped() {
+        let mut s = Searcher::new(1);
+        let m = Move::new(12, 28, 0);
+        s.store_killer(3, m);
+        assert_eq!(s.killers[3][0], m);
+        s.store_killer(3, m);
+        assert_eq!(s.killers[3][1], Move::NONE);
+        let m2 = Move::new(11, 27, 0);
+        s.store_killer(3, m2);
+        assert_eq!(s.killers[3][0], m2);
+        assert_eq!(s.killers[3][1], m);
+    }
+
+    #[test]
+    fn move_ordering_has_exact_killer_precedence() {
+        let b = Board::from_fen("7k/P7/8/1p6/8/8/1R6/K7 w - - 0 1").unwrap();
+        let tt = Move::new(9, 8, FLAG_QUIET);
+        let capture = Move::new(9, 33, FLAG_CAP);
+        let quiet_promotion = Move::new(48, 56, FLAG_PROMO + 3);
+        let killer = Move::new(9, 10, FLAG_QUIET);
+        let quiet = Move::new(9, 11, FLAG_QUIET);
+        let mut moves = vec![quiet, killer, quiet_promotion, capture, tt];
+        let mut s = Searcher::new(1);
+        s.killers[0][0] = killer;
+
+        s.order_moves(&b, &mut moves, tt, 0);
+
+        assert_eq!(moves, vec![tt, capture, quiet_promotion, killer, quiet]);
     }
 }
