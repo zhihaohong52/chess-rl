@@ -2,6 +2,21 @@ use crate::{board::Board, eval::{Eval, Hce, MATERIAL}, movegen::generate, moves:
 use std::time::{Duration, Instant};
 pub const MATE: i32 = 30_000;
 const MATE_BOUND: i32 = MATE - 1_000;
+
+#[cfg(test)]
+std::thread_local! {
+    static ASPIRATION_RETRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_aspiration_retries() {
+    ASPIRATION_RETRIES.with(|retries| retries.set(0));
+}
+
+#[cfg(test)]
+fn aspiration_retries() -> u32 {
+    ASPIRATION_RETRIES.with(std::cell::Cell::get)
+}
 #[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
 pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, eval: Hce }
 impl Searcher {
@@ -63,12 +78,20 @@ impl Searcher {
                 if alpha == -MATE {
                     return score;
                 }
+                #[cfg(test)]
+                ASPIRATION_RETRIES.with(|retries| {
+                    retries.set(retries.get().saturating_add(1));
+                });
                 alpha = alpha.saturating_sub(delta).max(-MATE);
             } else {
                 debug_assert!(score >= beta);
                 if beta == MATE {
                     return score;
                 }
+                #[cfg(test)]
+                ASPIRATION_RETRIES.with(|retries| {
+                    retries.set(retries.get().saturating_add(1));
+                });
                 beta = beta.saturating_add(delta).min(MATE);
             }
             delta = delta.saturating_add(delta / 2).min(MATE);
@@ -164,19 +187,96 @@ fn order(b:&Board,moves:&mut [Move],tt:Move){moves.sort_by_key(|m|if *m==tt{-1_0
 fn to_tt(s:i32,ply:i32)->i32{if s>MATE_BOUND{s+ply}else if s < -MATE_BOUND{s-ply}else{s}} fn from_tt(s:i32,ply:i32)->i32{if s>MATE_BOUND{s-ply}else if s < -MATE_BOUND{s+ply}else{s}}
 fn score_text(s:i32)->String{if s.abs()>MATE_BOUND{format!("mate {}",if s>0{(MATE-s+1)/2}else{-((MATE+s+1)/2)})}else{format!("cp {s}")}}
 fn deadline(b:&Board,l:&Limits)->Option<Instant>{if let Some(ms)=l.movetime{return Some(Instant::now()+Duration::from_millis(ms.saturating_sub(20)))}let(time,inc)=if b.side==Color::White{(l.wtime,l.winc)}else{(l.btime,l.binc)};let time=time?;Some(Instant::now()+Duration::from_millis((time/25+inc.unwrap_or(0)/2).max(10).min(time.saturating_sub(50).max(10))))}
-#[cfg(test)] mod tests { use super::*; fn best(f:&str,d:u32)->String{let mut b=Board::from_fen(f).unwrap();Searcher::new(4).think(&mut b,&Limits{depth:Some(d),..Default::default()},&[]).uci()} #[test]fn finds_mate_in_1(){assert_eq!(best("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1",4),"e1e8")} #[test]fn takes_free_queen(){assert_eq!(best("k7/8/8/3q4/8/2N5/8/K7 w - - 0 1",4),"c3d5")} #[test]fn stalemate_is_none(){let mut b=Board::from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1").unwrap();assert_eq!(Searcher::new(1).think(&mut b,&Limits{depth:Some(3),..Default::default()},&[]),Move::NONE)}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINNING_CAPTURE_FEN: &str = "k7/8/8/3q4/8/2N5/8/K7 w - - 0 1";
+    const NEGATIVE_MATE_FEN: &str = "7k/6Q1/6K1/8/8/8/8/8 b - - 0 1";
+    const RA8_MATE_FEN: &str = "6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1";
+
+    fn best(f: &str, d: u32) -> String {
+        let mut b = Board::from_fen(f).unwrap();
+        Searcher::new(4)
+            .think(&mut b, &Limits { depth: Some(d), ..Default::default() }, &[])
+            .uci()
+    }
+
+    fn full_window_score(fen: &str, depth: u32) -> i32 {
+        let mut board = Board::from_fen(fen).unwrap();
+        Searcher::new(1).negamax(&mut board, depth as i32, -MATE, MATE, 0)
+    }
+
+    fn aspiration_score(fen: &str, depth: u32, prev: i32) -> i32 {
+        let mut board = Board::from_fen(fen).unwrap();
+        Searcher::new(1).aspiration(&mut board, depth, prev)
+    }
+
     #[test]
-    fn aspiration_still_finds_winning_capture() {
+    fn finds_mate_in_1() {
+        assert_eq!(best("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 4), "e1e8");
+    }
+
+    #[test]
+    fn takes_free_queen() {
+        assert_eq!(best(WINNING_CAPTURE_FEN, 4), "c3d5");
+    }
+
+    #[test]
+    fn stalemate_is_none() {
+        let mut b = Board::from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1").unwrap();
         assert_eq!(
-            best("k7/8/8/3q4/8/2N5/8/K7 w - - 0 1", 6),
-            "c3d5"
+            Searcher::new(1).think(&mut b, &Limits { depth: Some(3), ..Default::default() }, &[]),
+            Move::NONE
         );
     }
 
     #[test]
+    fn aspiration_retries_on_ordinary_fail_high() {
+        let expected = full_window_score(WINNING_CAPTURE_FEN, 6);
+        assert!((26..=MATE_BOUND).contains(&expected));
+
+        reset_aspiration_retries();
+        let actual = aspiration_score(WINNING_CAPTURE_FEN, 6, 0);
+
+        assert_eq!(actual, expected);
+        assert!(aspiration_retries() > 0);
+    }
+
+    #[test]
+    fn aspiration_retries_on_ordinary_fail_low() {
+        let expected = full_window_score(WINNING_CAPTURE_FEN, 6);
+        assert!((26..=975).contains(&expected));
+
+        reset_aspiration_retries();
+        let actual = aspiration_score(WINNING_CAPTURE_FEN, 6, 1_000);
+
+        assert_eq!(actual, expected);
+        assert!(aspiration_retries() > 0);
+    }
+
+    #[test]
     fn aspiration_returns_at_a_mate_bound() {
-        let mut b = Board::from_fen("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1").unwrap();
-        let mut s = Searcher::new(1);
-        assert_eq!(s.aspiration(&mut b, 4, 0), -MATE);
+        let expected = full_window_score(NEGATIVE_MATE_FEN, 4);
+        assert_eq!(expected, -MATE);
+
+        reset_aspiration_retries();
+        let actual = aspiration_score(NEGATIVE_MATE_FEN, 4, 0);
+
+        assert_eq!(actual, expected);
+        assert!(aspiration_retries() > 0);
+    }
+
+    #[test]
+    fn aspiration_retries_to_positive_mate_bound() {
+        let expected = full_window_score(RA8_MATE_FEN, 4);
+        assert_eq!(expected, MATE - 1);
+
+        reset_aspiration_retries();
+        let actual = aspiration_score(RA8_MATE_FEN, 4, MATE_BOUND);
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual, MATE - 1);
+        assert!(aspiration_retries() > 0);
     }
 }
