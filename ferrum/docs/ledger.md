@@ -11,6 +11,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-15 | M0 (v0.1.0) | 6,009,132 | 25 + deep perft | 100g vs Stockfish UCI_Elo=2000, 8+0.08, 24-opening book → **40.5%** (35W/54L/11D), Elo −66.8 ± 68.7 → est ~1930 |
 | 2026-07-16 | M1 Task 4 (magic bitboards) — rejected/reverted | 6,009,132 | candidate 27 pass; restored 25 pass/1 ignored | Warmed paired median **+4.45%**, ratio 1.0445 (95% CI 1.0276–1.0649); failed frozen ≥10% gate; profiling put theoretical maximum below 10%; SPRT not run; ray-scan source restored |
 | 2026-07-17 | M1 Task 5 (PVS) — rejected/reverted | candidate 4,500,816 / restored 6,009,132 (−25.10%) | candidate focused 4 pass/23 filtered; full 26 pass/1 ignored; restored 25 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 243W/226L/1531D, SPRT Delta-Elo +2.95 ± 6.04 (95% CI [−3.09, +8.99]), LLR +0.46; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
+| 2026-07-17 | M1 Task 6 (aspiration windows) — accepted | baseline 6,009,132 / candidate 5,612,148 (−6.61%) | focused 2 pass/26 filtered; full search 5 pass/23 filtered; release 27 pass/1 ignored; deep perft; clippy clean | definitive 2,000-game SPRT: 279W/239L/1482D, relative Delta-Elo +6.95 ± 5.86 (95% CI [+1.09, +12.81]), LLR +1.86 inside boundaries; cap acceptance because CI is wholly positive; source retained |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -58,6 +59,36 @@ tracked source at `.superpowers/sdd/task-5-rejected.patch`
 (SHA-256 `f78b97504dfd290d1471e3e7eae969c4f9b7e7c586f6435f7553705c569089ba`);
 its baseline apply-check passed. Cost: **$0**.
 
+## M1 Task 6 — ACCEPTED
+
+Task 6 adds aspiration windows at the iterative-deepening root. The frozen
+comparison was **6,009,132 nodes / 3,813,821 NPS** for the baseline and
+**5,612,148 nodes / 3,856,047 NPS** for the candidate: 396,984 fewer nodes
+(**−6.61%**). A fresh finalizer re-bench reproduced 5,612,148 nodes at
+3,857,760 NPS; throughput is timing-dependent and not an Elo claim.
+
+Validation was exact: focused aspiration tests were **2 passed, 26 filtered**;
+the complete search set was **5 passed, 23 filtered**; `cargo test --release`
+had **27 passed, 0 failed, 1 ignored**; all-target release clippy with
+`-D warnings` was clean; ignored `perft_deep` was **1 passed, 27 filtered**;
+and live release `perft 6` produced **119,060,324**. The UCI smoke returned
+`uciok`, `readyok`, and legal `bestmove b1c3`; `git diff --check` was clean.
+
+The definitive unpooled 2,000-game fastchess SPRT at 8+0.08 finished normally
+after 02:29:45: **279W/239L/1482D**. Its relative self-play SPRT Delta-Elo was
+**+6.95 ± 5.86**, with an approximate 95% CI of **[+1.09, +12.81]**. The LLR
+was **+1.86**, inside **(−2.94, +2.94)**, so no boundary was reached. The
+2,000-game cap acceptance rule requires the entire reported CI to be above
+zero; it is, so the task is accepted. This is a relative self-play development
+estimate, not an absolute anchored Elo. The definitive log had no error,
+illegal-move, disconnect, crash, killed, or failed entry; its PGN accounts for
+all 2,000 games.
+
+The accepted source is retained. PVS remains absent, and the readable
+full-window negamax restructuring is retained as part of this accepted
+aspiration patch; it does not introduce a first-move or null-window search.
+Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -85,6 +116,7 @@ that is the number the 3000+ goal is measured against.
 | — | M0 is local-only (Mac); no ThunderCompute spend | $0.00 | $0.00 |
 | 2026-07-16 | M1 Task 4 local magic-bitboard experiment (rejected) | $0.00 | $0.00 |
 | 2026-07-17 | M1 Task 5 local PVS experiment (rejected/reverted) | $0.00 | $0.00 |
+| 2026-07-17 | M1 Task 6 local aspiration-window experiment (accepted) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -101,14 +133,11 @@ A6000). Hard alerts at $10 and $20 cumulative.
 
 ## Next (M1)
 
-Runtime-found magic bitboards (Task 4) and PVS (Task 5) were rejected and
-reverted under their frozen gates. **Task 6, aspiration windows, is the next
-planned task once Task 5 review closes.** PVS is absent from the restored
-engine. Later work may include a semantics-neutral, readable-negamax
-restructuring only as part of a separately gated later experiment; it must not
-reintroduce the rejected PVS behavior without a new approved experiment and
-acceptance criterion. The remaining search stack is
-null-move, LMR, aspiration windows, and better time management, followed by the
-CCRL-anchored gauntlet for the first honest absolute rating. No magic retry is
-planned; any future compact redesign requires separate approval. Target:
-~2300–2500.
+Runtime-found magic bitboards (Task 4) and PVS (Task 5) remain rejected and
+reverted under their frozen gates. **Task 6, aspiration windows, is accepted**:
+its readable full-window negamax restructuring is retained with the patch, and
+PVS remains absent. **Task 7, killer moves, is the next planned task after Task
+6 review closure.** The remaining search stack is null-move, LMR, and better
+time management, followed by the CCRL-anchored gauntlet for the first honest
+absolute rating. No magic retry is planned; any future compact redesign
+requires separate approval. Target: ~2300–2500.
