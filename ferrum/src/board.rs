@@ -26,6 +26,12 @@ pub struct Undo {
     hash: u64,
 }
 
+pub struct NullUndo {
+    ep: Option<u8>,
+    hash: u64,
+    halfmove: u16,
+}
+
 #[derive(Clone)]
 pub struct Board {
     pub bb: [Bb; 12],
@@ -261,6 +267,30 @@ impl Board {
         self.halfmove = u.halfmove;
         self.hash = u.hash; // full restore — no incremental unmake hashing needed
     }
+
+    pub fn has_non_pawn_material(&self, c: Color) -> bool {
+        (self.bb[pc(c, KNIGHT)] | self.bb[pc(c, BISHOP)] | self.bb[pc(c, ROOK)] | self.bb[pc(c, QUEEN)]) != 0
+    }
+
+    pub fn make_null(&mut self) -> NullUndo {
+        let zb = z();
+        let u = NullUndo { ep: self.ep, hash: self.hash, halfmove: self.halfmove };
+        if let Some(e) = self.ep {
+            self.hash ^= zb.ep_file[file_of(e) as usize];
+        }
+        self.ep = None;
+        self.halfmove += 1;
+        self.side = self.side.flip();
+        self.hash ^= zb.side;
+        u
+    }
+
+    pub fn unmake_null(&mut self, u: NullUndo) {
+        self.side = self.side.flip();
+        self.ep = u.ep;
+        self.hash = u.hash;
+        self.halfmove = u.halfmove;
+    }
 }
 
 #[cfg(test)]
@@ -323,5 +353,40 @@ mod tests {
         assert!(Board::from_fen("7k/8/8/8/8/8/8/K3p3 w - - 0 1").is_err());
         // Control: same material one rank inward parses fine.
         assert!(Board::from_fen("7k/4P3/8/8/8/8/4p3/K7 w - - 0 1").is_ok());
+    }
+    #[test]
+    fn null_move_round_trips() {
+        let mut b = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
+        let (h, side, ep) = (b.hash, b.side, b.ep);
+        let u = b.make_null();
+        assert_eq!(b.side, side.flip());
+        assert_ne!(b.hash, h);
+        b.unmake_null(u);
+        assert_eq!(b.hash, h);
+        assert_eq!(b.side, side);
+        assert_eq!(b.ep, ep);
+    }
+    #[test]
+    fn null_move_round_trips_with_ep() {
+        // After 1.e4, the ep square is set (e3); this exercises the ep-file
+        // XOR path in make_null/unmake_null that the Kiwipete FEN (no ep
+        // square) does not touch.
+        let mut b = Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1").unwrap();
+        assert_eq!(b.ep, Some(sq(4, 2))); // e3
+        let (h, side, ep) = (b.hash, b.side, b.ep);
+        let u = b.make_null();
+        assert_eq!(b.side, side.flip());
+        assert_ne!(b.hash, h);
+        b.unmake_null(u);
+        assert_eq!(b.hash, h);
+        assert_eq!(b.side, side);
+        assert_eq!(b.ep, ep);
+    }
+    #[test]
+    fn non_pawn_material_guard() {
+        let kp = Board::from_fen("k7/8/8/8/8/8/4P3/K7 w - - 0 1").unwrap();
+        assert!(!kp.has_non_pawn_material(Color::White));
+        let kr = Board::from_fen("k7/8/8/8/8/8/8/K3R3 w - - 0 1").unwrap();
+        assert!(kr.has_non_pawn_material(Color::White));
     }
 }

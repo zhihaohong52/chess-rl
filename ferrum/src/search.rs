@@ -167,6 +167,26 @@ impl Searcher {
             }
         }
 
+        // Null-move pruning: skip a turn and see if the position is still >= beta.
+        // Guarded against check and likely-zugzwang (side must have non-pawn material).
+        // Fail-hard: returns beta (not the null score) on cutoff.
+        if depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND
+            && !b.in_check(b.side) && b.has_non_pawn_material(b.side)
+        {
+            let r = 2 + depth / 4;
+            let u = b.make_null();
+            self.history.push(b.hash);
+            let s = -self.negamax(b, depth - 1 - r, -beta, -beta + 1, ply + 1);
+            self.history.pop();
+            b.unmake_null(u);
+            if self.stopped {
+                return 0;
+            }
+            if s >= beta {
+                return beta;
+            }
+        }
+
         let mut moves = Vec::with_capacity(64);
         generate(b, &mut moves);
         self.order_moves(b, &mut moves, tt_move, ply);

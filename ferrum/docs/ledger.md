@@ -14,6 +14,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-17 | M1 Task 6 (aspiration windows) — accepted | baseline 6,009,132 / candidate 5,612,148 (−6.61%) | focused 2 pass/26 filtered; full search 5 pass/23 filtered; release 27 pass/1 ignored; deep perft; clippy clean | definitive 2,000-game SPRT: 279W/239L/1482D, relative Delta-Elo +6.95 ± 5.86 (95% CI [+1.09, +12.81]), LLR +1.86 inside boundaries; cap acceptance because CI is wholly positive; source retained |
 | 2026-07-17 | M1 Task 7 (killer moves) — accepted | baseline 5,612,148 / candidate 3,166,392 (−43.58%) | focused 1+1 pass/31 filtered each; full search 9 pass/23 filtered; release 31 pass/1 ignored; deep perft; clippy clean | H1 accepted after 992 games: 160W/93L/739D, relative Delta-Elo +23.50 ± 10.09, LLR +2.98 crossed +2.94; source retained |
 | 2026-07-18 | M1 Task 8 (butterfly history heuristic) — rejected/reverted | baseline 3,166,392 / candidate 3,108,001 (−1.84%) | candidate full 34 pass/1 ignored; restored 31 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 274W/246L/1480D, relative SPRT Delta-Elo +4.86 ± 6.46 (95% CI [−1.60, +11.32]), LLR +0.99; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
+| 2026-07-18 | M1 Task 9 (null-move pruning) — accepted | baseline 3,166,392 / candidate 1,449,025 (−54.24%) | full release 34 pass/0 fail/1 ignored (31 baseline + 3 new null-move tests); deep perft; clippy clean | H1 accepted after 558 games: 120W/47L/391D, relative SPRT Delta-Elo +45.72 ± 14.48, LLR +2.97 crossed +2.94; source retained |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -162,6 +163,56 @@ is preserved outside tracked source at
 it reverse-applies to the prior candidate working tree and forward-applies to
 the pristine baseline of `search.rs` at `2574594`. Cost: **$0**.
 
+## M1 Task 9 — ACCEPTED
+
+Task 9 adds null-move pruning (NMP) to `negamax`, backed by new board-level
+null-move helpers. `Board` gained `NullUndo` (private fields mirroring
+`Undo`), `has_non_pawn_material`, and `make_null`/`unmake_null`; `negamax`
+prunes when `depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND &&
+!b.in_check(b.side) && b.has_non_pawn_material(b.side)`, using reduction
+`r = 2 + depth / 4` and a fail-hard cutoff (`return beta`) on a null-window
+recursive search that scores `>= beta`; `self.history` push/pop bracket the
+null recursive call symmetrically, matching the existing real-move loop. The
+frozen benchmark comparison is **3,166,392 nodes / 3,006,102 NPS** for the
+baseline and **1,449,025 nodes / 2,887,852 NPS** for the candidate:
+1,717,367 fewer nodes (**−54.24%**). A fresh finalizer re-bench reproduced
+1,449,025 nodes exactly; NPS is timing-dependent and is not an Elo claim.
+
+Validation was exact: three new board tests — `null_move_round_trips`,
+`null_move_round_trips_with_ep` (post-1.e4 FEN, exercising the ep-file XOR
+path), and `non_pawn_material_guard` — were added first and confirmed RED
+(missing-method compile errors) before implementation, then GREEN.
+`cargo test --release` had **34 passed, 0 failed, 1 ignored** (31 baseline +
+3 new); all-target release clippy with `-D warnings` was clean; ignored
+`perft_deep` was **1 passed, 34 filtered**, its chained asserts confirming
+live startpos depth 6 = **119,060,324**. The UCI smoke returned `uciok`,
+`readyok`, and legal `bestmove b1c3`; `git diff --check` was clean; the diff
+was a pure addition across `board.rs` (+65) and `search.rs` (+20), no
+deletions.
+
+The definitive normalized fastchess SPRT at 8+0.08 (concurrency 2) ended when
+**H1 was accepted** after **558 games: 120W/47L/391D** (120+47+391=558) for
+candidate versus baseline. Relative self-play SPRT Delta-Elo was **+45.72 ±
+14.48**, and LLR **+2.97** crossed the **+2.94** upper boundary. This is a
+relative self-play development estimate, not an absolute anchored Elo. The
+definitive log has exactly one `Finished match`, took 01:22:41, and recorded
+no error, illegal-move, disconnect, crash, killed, or failed entry; an
+independent recount of its `{...}` result tags (108 White-mates + 59
+Black-mates + 390 threefold draws + 1 insufficient-material draw = 558)
+matches the printed W/L/D exactly. **This SPRT run survived a mid-run
+session restart** — the runner and fastchess subprocess continued as
+orphaned processes across the restart and completed cleanly to the H1
+boundary; the definitive fastchess config was recovered from the isolated
+run directory afterward, and no killed/partial stub exists for this task
+(unlike Task 8's OOM-killed first attempt).
+
+The accepted source is retained. PVS and the history heuristic remain
+absent; quiet-move ordering still falls back to the killer/unscored
+precedence established in Task 7. The consecutive-null-move guard
+(disallowing a null move immediately after another null move) was
+intentionally omitted from this patch and is documented as future
+hardening, not a defect. Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -192,6 +243,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-17 | M1 Task 6 local aspiration-window experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-17 | M1 Task 7 local killer-move experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-18 | M1 Task 8 local history-heuristic experiment (rejected/reverted) | $0.00 | $0.00 |
+| 2026-07-18 | M1 Task 9 local null-move-pruning experiment (accepted) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -210,13 +262,14 @@ A6000). Hard alerts at $10 and $20 cumulative.
 
 Runtime-found magic bitboards (Task 4), PVS (Task 5), and the butterfly
 history heuristic (Task 8) remain rejected and reverted under their frozen
-gates. **Task 6, aspiration windows, and Task 7, killer moves, are accepted
-and retained**; PVS remains absent, and the history table is absent —
-quiet-move ordering falls back to the killer/unscored precedence established
-in Task 7. **Task 9, null-move pruning, is next.** Task 11, late move
-reductions, builds on the accepted full-window
-negamax loop independently of history and does not depend on it. The
-remaining search stack is null-move, LMR, and better time management,
-followed by the CCRL-anchored gauntlet for the first honest absolute rating.
-No magic or history retry is planned; any future compact redesign requires
-separate approval. Target: ~2300–2500.
+gates. **Task 6, aspiration windows; Task 7, killer moves; and Task 9,
+null-move pruning, are accepted and retained**; PVS remains absent, and the
+history table is absent — quiet-move ordering falls back to the
+killer/unscored precedence established in Task 7. **Task 10, reverse futility
+pruning (static null-move), is next after review closure.** Task 11, late
+move reductions, builds on the accepted full-window negamax loop
+independently of history and does not depend on it. The remaining search
+stack is reverse futility pruning, LMR, and better time management, followed
+by the CCRL-anchored gauntlet for the first honest absolute rating. No magic
+or history retry is planned; any future compact redesign requires separate
+approval. Target: ~2300–2500.
