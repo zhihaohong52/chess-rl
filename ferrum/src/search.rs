@@ -167,11 +167,20 @@ impl Searcher {
             }
         }
 
+        let in_check = b.in_check(b.side);
+        let static_eval = self.eval.eval(b);
+        // Reverse futility pruning (static null-move): at shallow depth, if the static
+        // eval beats beta by a depth-scaled margin, assume the node holds and prune.
+        // Fail-soft: returns the static eval.
+        if depth <= 6 && !in_check && beta.abs() < MATE_BOUND && static_eval - 80 * depth >= beta {
+            return static_eval;
+        }
+
         // Null-move pruning: skip a turn and see if the position is still >= beta.
         // Guarded against check and likely-zugzwang (side must have non-pawn material).
         // Fail-hard: returns beta (not the null score) on cutoff.
         if depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND
-            && !b.in_check(b.side) && b.has_non_pawn_material(b.side)
+            && !in_check && static_eval >= beta && b.has_non_pawn_material(b.side)
         {
             let r = 2 + depth / 4;
             let u = b.make_null();
@@ -347,6 +356,12 @@ mod tests {
         s.store_killer(3, m2);
         assert_eq!(s.killers[3][0], m2);
         assert_eq!(s.killers[3][1], m);
+    }
+
+    #[test]
+    fn rfp_keeps_tactics() {
+        assert_eq!(best("k7/8/8/3q4/8/2N5/8/K7 w - - 0 1", 7), "c3d5");
+        assert_eq!(best("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 5), "e1e8");
     }
 
     #[test]
