@@ -13,6 +13,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-17 | M1 Task 5 (PVS) — rejected/reverted | candidate 4,500,816 / restored 6,009,132 (−25.10%) | candidate focused 4 pass/23 filtered; full 26 pass/1 ignored; restored 25 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 243W/226L/1531D, SPRT Delta-Elo +2.95 ± 6.04 (95% CI [−3.09, +8.99]), LLR +0.46; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
 | 2026-07-17 | M1 Task 6 (aspiration windows) — accepted | baseline 6,009,132 / candidate 5,612,148 (−6.61%) | focused 2 pass/26 filtered; full search 5 pass/23 filtered; release 27 pass/1 ignored; deep perft; clippy clean | definitive 2,000-game SPRT: 279W/239L/1482D, relative Delta-Elo +6.95 ± 5.86 (95% CI [+1.09, +12.81]), LLR +1.86 inside boundaries; cap acceptance because CI is wholly positive; source retained |
 | 2026-07-17 | M1 Task 7 (killer moves) — accepted | baseline 5,612,148 / candidate 3,166,392 (−43.58%) | focused 1+1 pass/31 filtered each; full search 9 pass/23 filtered; release 31 pass/1 ignored; deep perft; clippy clean | H1 accepted after 992 games: 160W/93L/739D, relative Delta-Elo +23.50 ± 10.09, LLR +2.98 crossed +2.94; source retained |
+| 2026-07-18 | M1 Task 8 (butterfly history heuristic) — rejected/reverted | baseline 3,166,392 / candidate 3,108,001 (−1.84%) | candidate full 34 pass/1 ignored; restored 31 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 274W/246L/1480D, relative SPRT Delta-Elo +4.86 ± 6.46 (95% CI [−1.60, +11.32]), LLR +0.99; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -121,6 +122,46 @@ across aspiration retries and iterative depths within that think. qsearch
 remains killer-free, using its existing free capture ordering; PVS, first-move,
 null-window, and re-search behavior remain absent. Cost: **$0**.
 
+## M1 Task 8 — REJECTED / REVERTED
+
+The butterfly history heuristic candidate preserved its pre-test correctness
+gates: the full release suite had **34 passing tests** (31 baseline + 3 new —
+deterministic history accumulation, rescale-above-threshold, and move-ordering
+precedence between killer and unscored quiet), zero failures, one ignored
+test, all-target release clippy was clean, and UCI smoke completed with
+`uciok`, `readyok`, and legal `bestmove b1c3`. Its bench result was
+**3,108,001 nodes**, a **58,391-node (−1.84%)** reduction from the
+**3,166,392-node** baseline; NPS is timing-dependent and is not an Elo claim.
+
+An initial SPRT attempt at concurrency 4 was OS-OOM-killed with **0 games**
+completed; the stub is preserved at
+`.superpowers/sdd/task-8-sprt-killed-attempt-1.log` and excluded from all
+accounting. The authoritative run used concurrency 2 — an environment-only
+override — with games remaining independent and the SPRT valid at the same
+8+0.08 time control.
+
+The definitive, unpooled 2,000-game fastchess SPRT at 8+0.08 finished
+normally after 06:40:48 with **274W/246L/1480D**, relative SPRT Delta-Elo
+**+4.86 ± 6.46**, and 95% CI **[−1.60, +11.32]**. Its LLR **+0.99** remained
+inside the **(−2.94, +2.94)** boundaries, so neither boundary was reached. At
+the cap, acceptance required a SPRT Delta-Elo confidence interval wholly
+above zero; this interval crosses zero. There was therefore **no SPRT
+acceptance**. This is a relative self-play development estimate, not an
+absolute anchored Elo. Timeouts were mild and favored the candidate (base 13,
+cand 8), so the rejection is not an artifact of engine instability; the log
+recorded no crash, illegal move, or disconnect.
+
+Under direct authorization, only `ferrum/src/search.rs` was restored to
+baseline commit `2574594cde7ef13c10474c88128b393dfe220585`; the rejected
+history-heuristic behavior is absent. Fresh restored-baseline verification
+completed with 31 passing tests, zero failures, one ignored test, clean
+all-target release clippy, and the 3,166,392-node bench. The rejected patch
+is preserved outside tracked source at
+`.superpowers/sdd/task-8-rejected.patch`
+(SHA-256 `98d8c7af08dbdcac06b6d8503a5c8dde109c1d638519d5f4c01ab0481d7e9efb`);
+it reverse-applies to the prior candidate working tree and forward-applies to
+the pristine baseline of `search.rs` at `2574594`. Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -150,6 +191,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-17 | M1 Task 5 local PVS experiment (rejected/reverted) | $0.00 | $0.00 |
 | 2026-07-17 | M1 Task 6 local aspiration-window experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-17 | M1 Task 7 local killer-move experiment (accepted) | $0.00 | $0.00 |
+| 2026-07-18 | M1 Task 8 local history-heuristic experiment (rejected/reverted) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -166,11 +208,15 @@ A6000). Hard alerts at $10 and $20 cumulative.
 
 ## Next (M1)
 
-Runtime-found magic bitboards (Task 4) and PVS (Task 5) remain rejected and
-reverted under their frozen gates. **Task 6, aspiration windows, and Task 7,
-killer moves, are accepted and retained**; PVS remains absent. **Task 8,
-history heuristic, is next after Task 7 review closure.** The remaining search
-stack is null-move, LMR, and better time management, followed by the
-CCRL-anchored gauntlet for the first honest absolute rating. No magic retry is
-planned; any future compact redesign requires separate approval. Target:
-~2300–2500.
+Runtime-found magic bitboards (Task 4), PVS (Task 5), and the butterfly
+history heuristic (Task 8) remain rejected and reverted under their frozen
+gates. **Task 6, aspiration windows, and Task 7, killer moves, are accepted
+and retained**; PVS remains absent, and the history table is absent —
+quiet-move ordering falls back to the killer/unscored precedence established
+in Task 7. **Task 9, null-move pruning, is next.** Task 11, late move
+reductions, builds on the accepted full-window
+negamax loop independently of history and does not depend on it. The
+remaining search stack is null-move, LMR, and better time management,
+followed by the CCRL-anchored gauntlet for the first honest absolute rating.
+No magic or history retry is planned; any future compact redesign requires
+separate approval. Target: ~2300–2500.
