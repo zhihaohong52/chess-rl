@@ -168,7 +168,7 @@ impl Searcher {
         }
 
         let in_check = b.in_check(b.side);
-        let static_eval = self.eval.eval(b);
+        let static_eval = if in_check { 0 } else { self.eval.eval(b) };
         // Reverse futility pruning (static null-move): at shallow depth, if the static
         // eval beats beta by a depth-scaled margin, assume the node holds and prune.
         // Fail-soft: returns the static eval.
@@ -178,6 +178,7 @@ impl Searcher {
 
         // Null-move pruning: skip a turn and see if the position is still >= beta.
         // Guarded against check and likely-zugzwang (side must have non-pawn material).
+        // Eval-gated: only attempted when static_eval already looks >= beta.
         // Fail-hard: returns beta (not the null score) on cutoff.
         if depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND
             && !in_check && static_eval >= beta && b.has_non_pawn_material(b.side)

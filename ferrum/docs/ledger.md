@@ -250,7 +250,9 @@ An initial SPRT attempt at concurrency 2 was OS-SIGKILL'd instantly with
 **0 games** completed — a transient host memory spike from other
 applications, not an engine defect; the stub is preserved at
 `.superpowers/sdd/task-10-sprt-killed-attempt-1.log` and excluded from all
-accounting. The authoritative run used **concurrency 1**.
+accounting. The authoritative run used **concurrency 1** — an
+environment-only override, with games remaining independent and the SPRT
+valid at the same 8+0.08 time control.
 
 The definitive normalized fastchess SPRT at 8+0.08 (concurrency 1) ended
 when **H1 was accepted** after **672 games: 111W/49L/512D**
