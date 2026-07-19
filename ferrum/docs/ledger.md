@@ -17,6 +17,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-18 | M1 Task 9 (null-move pruning) — accepted | baseline 3,166,392 / candidate 1,449,025 (−54.24%) | full release 34 pass/0 fail/1 ignored (31 baseline + 3 new null-move tests); deep perft; clippy clean | H1 accepted after 558 games: 120W/47L/391D, relative SPRT Delta-Elo +45.72 ± 14.48, LLR +2.97 crossed +2.94; source retained |
 | 2026-07-19 | M1 Task 10 (reverse futility pruning + eval-gated NMP) — accepted | baseline 1,449,025 / candidate 644,979 (−55.49%) | full release 35 pass/0 fail/1 ignored (34 baseline + rfp_keeps_tactics); deep perft; clippy clean | H1 accepted after 672 games: 111W/49L/512D, relative SPRT Delta-Elo +32.15 ± 11.13, LLR +2.95 crossed +2.94; source retained |
 | 2026-07-19 | M1 Task 11 (full-window late move reductions) — accepted | baseline 644,979 / candidate 195,096 (−69.75%) | full release 36 pass/0 fail/1 ignored (35 baseline + lmr_still_finds_deep_tactic); deep perft; clippy clean | H1 accepted after 710 games: 100W/45L/565D, relative SPRT Delta-Elo +26.97 ± 10.42, LLR +2.95 crossed +2.94; source retained |
+| 2026-07-19 | M1 Task 12 (late move pruning, move-count) — accepted | baseline 195,096 / candidate 161,418 (−17.26%) | full release 37 pass/0 fail/1 ignored (36 baseline + lmp_keeps_tactics); deep perft; clippy clean | H1 accepted after 798 games: 92W/43L/663D, relative SPRT Delta-Elo +21.36 ± 8.61, LLR +2.94 crossed +2.94; source retained |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -328,6 +329,79 @@ The accepted source is retained. PVS and the history heuristic remain
 absent; quiet-move ordering still falls back to the killer/unscored
 precedence established in Task 7. Cost: **$0**.
 
+## M1 Task 12 — ACCEPTED
+
+Task 12 adds move-count late move pruning (LMP) to the `negamax` move loop.
+Right after `legal += 1`, the per-move `gives_check = b.in_check(b.side)` and
+`quiet = !m.is_capture() && !m.is_promo()` bindings were hoisted up so the
+pruning guard and the pre-existing Task 11 LMR block share them (LMR now reuses
+these instead of recomputing them). The guard is
+`if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND &&
+depth <= 3 && legal > 4 + depth * depth { b.unmake(m, undo); legal -= 1;
+continue; }`, skipping late quiet, non-checking moves at shallow depth once a
+real best already exists. Critically, the guard sits **before**
+`self.history.push(b.hash)`, so a pruned move unmakes and `continue`s without
+ever pushing to the repetition stack — push/pop stay balanced on every path,
+and the pruned move never reaches the TT store, killer store, or `best_move`
+update. The `legal -= 1` exactly undoes the earlier `legal += 1`, and the
+`legal > 1 && best > -MATE_BOUND` conjunction guarantees a genuinely-searched,
+non-losing move already exists whenever a prune fires, so the terminal
+`legal == 0` mate/stalemate check can never be reached on a false premise. LMP
+is a pure skip (`continue`), not a differently-windowed search, so the
+full-window-negamax design invariant is preserved — no null-window or PVS is
+introduced. The frozen benchmark comparison is **195,096 nodes / 2,613,893
+NPS** for the baseline and **161,418 nodes / 2,037,817 NPS** for the candidate:
+33,678 fewer nodes (**−17.26%**). A fresh finalizer re-bench reproduced 161,418
+nodes exactly; NPS is timing-dependent and is not an Elo claim.
+
+Validation was exact: the `lmp_keeps_tactics` regression-anchor test (a
+back-rank rook mate, `e1e8`, at depth 6) was added and confirmed passing both
+before and after the change. `cargo test --release` had **37 passed, 0 failed,
+1 ignored** (36 baseline + 1 new); all-target release clippy with `-D warnings`
+was clean; ignored `perft_deep` was **1 passed, 36 filtered**, confirming live
+startpos depth 6 = **119,060,324** (movegen untouched); the diff scope was
+exactly `ferrum/src/search.rs` (+15/−2). Spec-compliance and code-quality
+reviews both passed with merge-ready verdicts, verifying the history push/pop
+balance, mate/stalemate legal-count safety, TT/killer isolation of pruned
+moves, full-window-only compliance, and clean non-interference with LMR (their
+domains overlap only at `depth == 3`, where LMP's `continue` runs first).
+
+An honest limitation, flagged by the code-quality review and recorded here:
+`lmp_keeps_tactics` (used verbatim from the plan's Step 1, mirroring the RFP and
+LMR `*_keeps_tactics` anchors) is a weak *LMP-specific* regression guard —
+because the test's root is at nominal depth 6 (`> 3`), LMP never fires on the
+root move loop, and the answer `e1e8` is an immediate root mate that is fully
+searched regardless of what LMP does in sibling subtrees; the reviewer
+empirically confirmed the assertion still passes even with the guard forced off.
+The branch does get code coverage (it fires 22 times inside the depth-6 tree),
+but the assertion is insensitive to the guard's correctness. This is a
+plan-inherited test-design property, not a code defect; the decisive 798-game
+SPRT is the operative correctness/strength backstop for this feature.
+
+An initial SPRT attempt at concurrency 1 was OS-SIGKILL'd instantly with
+**0 games** completed, under a transient host memory spike from other
+applications — not an engine defect; the stub is preserved at
+`.superpowers/sdd/task-12-sprt-killed-attempt-1.log` and excluded from all
+accounting. A 2-game fastchess smoke then ran cleanly, confirming the host had
+recovered, and the retry ran at the same **concurrency 1** and completed to the
+H1 boundary — the transient memory spike, not a concurrency change, was the sole
+cause. The SPRT remains valid — same binaries, same 8+0.08 time control,
+independent games.
+
+The definitive normalized fastchess SPRT at 8+0.08 (concurrency 1) ended when
+**H1 was accepted** after **798 games: 92W/43L/663D** (92+43+663=798) for
+candidate versus baseline. Relative self-play SPRT Delta-Elo was **+21.36 ±
+8.61** (95% CI **[+12.75, +29.97]**, wholly positive), and LLR **+2.94** crossed
+the **+2.94** upper boundary. This is a relative self-play development estimate,
+not an absolute anchored Elo. The definitive log has exactly one `Finished
+match`, took 03:44:58, and recorded no error, illegal-move, disconnect, crash,
+killed, or failed entry; its 1,853,930-byte PGN independently contains all 798
+games.
+
+The accepted source is retained. PVS and the history heuristic remain absent;
+quiet-move ordering still falls back to the killer/unscored precedence
+established in Task 7. Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -361,6 +435,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-18 | M1 Task 9 local null-move-pruning experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-19 | M1 Task 10 local RFP + eval-gated-NMP experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-19 | M1 Task 11 local late-move-reductions experiment (accepted) | $0.00 | $0.00 |
+| 2026-07-19 | M1 Task 12 local late-move-pruning experiment (accepted) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -380,13 +455,15 @@ A6000). Hard alerts at $10 and $20 cumulative.
 Runtime-found magic bitboards (Task 4), PVS (Task 5), and the butterfly
 history heuristic (Task 8) remain rejected and reverted under their frozen
 gates. **Task 6, aspiration windows; Task 7, killer moves; Task 9, null-move
-pruning; Task 10, reverse futility pruning + eval-gated NMP; and Task 11,
-full-window late move reductions, are accepted and retained**; PVS remains
-absent, and the history table is absent — quiet-move ordering falls back to
-the killer/unscored precedence established in Task 7. **Task 12, late move
-pruning (move-count based), is next after review closure**, and builds on
-the accepted full-window negamax + LMR loop independently of history and
-does not depend on it. The remaining search stack is late move pruning and
-better time management, followed by the CCRL-anchored gauntlet for the
-first honest absolute rating. No magic or history retry is planned; any
-future compact redesign requires separate approval. Target: ~2300–2500.
+pruning; Task 10, reverse futility pruning + eval-gated NMP; Task 11,
+full-window late move reductions; and Task 12, move-count late move pruning,
+are accepted and retained**; PVS remains absent, and the history table is
+absent — quiet-move ordering falls back to the killer/unscored precedence
+established in Task 7. **Task 13, futility pruning of shallow quiets, is next**,
+and builds on the accepted full-window move loop, reusing the node-level
+`static_eval` and the per-move `gives_check`/`quiet` bindings alongside the
+Task 12 LMP guard. The remaining search stack is futility pruning, check
+extensions, static exchange evaluation (SEE), and better time management,
+followed by the CCRL-anchored gauntlet for the first honest absolute rating.
+No magic or history retry is planned; any future compact redesign requires
+separate approval. Target: ~2300–2500.
