@@ -1,4 +1,5 @@
 use crate::{board::Board, eval::{Eval, Hce, MATERIAL}, movegen::generate, moves::*, tt::*, types::*};
+use crate::attacks::{bishop_attacks, king_attacks, knight_attacks, pawn_attacks, rook_attacks};
 use std::time::{Duration, Instant};
 pub const MATE: i32 = 30_000;
 const MATE_BOUND: i32 = MATE - 1_000;
@@ -111,15 +112,17 @@ impl Searcher {
         }
     }
 
+    /// Move ordering for the main negamax search: SEE-based capture ranking (winning/equal
+    /// captures above killers, losing captures below). Deliberately not shared with the
+    /// cheap MVV-LVA `order` used by qsearch — the two are not interchangeable.
     fn order_moves(&self, b: &Board, moves: &mut [Move], tt: Move, ply: i32) {
         let p = (ply as usize).min(MAX_PLY - 1);
-        moves.sort_by_key(|m| {
+        moves.sort_by_cached_key(|m| {
             if *m == tt {
                 -2_000_000
             } else if m.is_capture() {
-                let victim = b.piece_on(m.to()).map(|piece| MATERIAL[piece % 6]).unwrap_or(100);
-                let attacker = b.piece_on(m.from()).map(|piece| MATERIAL[piece % 6]).unwrap_or(0);
-                -(1_000_000 + victim * 10 - attacker)
+                let g = see(b, *m);
+                if g >= 0 { -(1_000_000 + g) } else { -(g + 200_000) }
             } else if m.is_promo() {
                 -900_000
             } else if *m == self.killers[p][0] || *m == self.killers[p][1] {
@@ -289,9 +292,117 @@ impl Searcher {
         self.tt.store(b.hash, best_move, to_tt(best, ply), depth as i8, bound);
         best
     }
-    fn qsearch(&mut self,b:&mut Board,mut alpha:i32,beta:i32)->i32 { self.nodes+=1;if self.timed_out(){return 0} let stand=self.eval.eval(b);if stand>=beta{return stand} if stand>alpha{alpha=stand} let mut moves=Vec::new();generate(b,&mut moves);moves.retain(|m|m.is_capture()||m.is_promo());order(b,&mut moves,Move::NONE);for m in moves{let u=b.make(m);if b.in_check(b.side.flip()){b.unmake(m,u);continue}let score=-self.qsearch(b,-beta,-alpha);b.unmake(m,u);if score>alpha{alpha=score;if alpha>=beta{break}}}alpha }
+    fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32) -> i32 {
+        self.nodes += 1;
+        if self.timed_out() {
+            return 0;
+        }
+        let stand = self.eval.eval(b);
+        if stand >= beta {
+            return stand;
+        }
+        if stand > alpha {
+            alpha = stand;
+        }
+        let mut moves = Vec::new();
+        generate(b, &mut moves);
+        moves.retain(|m| m.is_capture() || m.is_promo());
+        order(b, &mut moves, Move::NONE);
+        for m in moves {
+            if m.is_capture() && !m.is_promo() && see(b, m) < 0 {
+                continue;
+            }
+            let u = b.make(m);
+            if b.in_check(b.side.flip()) {
+                b.unmake(m, u);
+                continue;
+            }
+            let score = -self.qsearch(b, -beta, -alpha);
+            b.unmake(m, u);
+            if score > alpha {
+                alpha = score;
+                if alpha >= beta {
+                    break;
+                }
+            }
+        }
+        alpha
+    }
 }
+/// Move ordering for qsearch: cheap MVV-LVA over the (already capture/promo-only) move
+/// list. Deliberately not the SEE-based `order_moves` used by negamax — the two are not
+/// interchangeable (this one is O(1) per move; SEE-based ordering is far more expensive).
 fn order(b:&Board,moves:&mut [Move],tt:Move){moves.sort_by_key(|m|if *m==tt{-1_000_000}else if m.is_capture(){let v=b.piece_on(m.to()).map(|p|MATERIAL[p%6]).unwrap_or(100);let a=b.piece_on(m.from()).map(|p|MATERIAL[p%6]).unwrap_or(0);-(10_000+v*10-a)}else if m.is_promo(){-9_000}else{0})}
+
+// Intentionally NOT `eval.rs`'s `MATERIAL` table: identical for P/N/B/R/Q but the KING
+// slot is 10_000 here vs 0 in MATERIAL. SEE simulates a chain of hypothetical recaptures
+// that can include a king, and a 0-value king would make "recapturing" with the king
+// look free/neutral instead of catastrophic — the large value keeps a king "capture" in
+// the exchange simulation from ever scoring as a favourable trade. Do not unify the two
+// tables.
+const SEE_VAL: [i32; 6] = [100, 320, 330, 500, 900, 10_000]; // P N B R Q K
+
+fn attackers_to(b: &Board, s: u8, occ: Bb) -> Bb {
+    let wp = pawn_attacks(Color::Black, s) & b.bb[pc(Color::White, PAWN)];
+    let bp = pawn_attacks(Color::White, s) & b.bb[pc(Color::Black, PAWN)];
+    let n = knight_attacks(s) & (b.bb[pc(Color::White, KNIGHT)] | b.bb[pc(Color::Black, KNIGHT)]);
+    let k = king_attacks(s) & (b.bb[pc(Color::White, KING)] | b.bb[pc(Color::Black, KING)]);
+    let bishops = b.bb[pc(Color::White, BISHOP)] | b.bb[pc(Color::Black, BISHOP)]
+        | b.bb[pc(Color::White, QUEEN)] | b.bb[pc(Color::Black, QUEEN)];
+    let rooks = b.bb[pc(Color::White, ROOK)] | b.bb[pc(Color::Black, ROOK)]
+        | b.bb[pc(Color::White, QUEEN)] | b.bb[pc(Color::Black, QUEEN)];
+    (wp | bp | n | k | (bishop_attacks(s, occ) & bishops) | (rook_attacks(s, occ) & rooks)) & occ
+}
+
+fn least_valuable(b: &Board, attackers: Bb, side: Color) -> Option<(u8, usize)> {
+    for pt in 0..6 {
+        let set = attackers & b.bb[pc(side, pt)];
+        if set != 0 { return Some((lsb(set), pt)); }
+    }
+    None
+}
+
+pub fn see(b: &Board, m: Move) -> i32 {
+    let to = m.to();
+    let mut from = m.from();
+    let mut occ = b.all();
+    let bishops = b.bb[pc(Color::White, BISHOP)] | b.bb[pc(Color::Black, BISHOP)]
+        | b.bb[pc(Color::White, QUEEN)] | b.bb[pc(Color::Black, QUEEN)];
+    let rooks = b.bb[pc(Color::White, ROOK)] | b.bb[pc(Color::Black, ROOK)]
+        | b.bb[pc(Color::White, QUEEN)] | b.bb[pc(Color::Black, QUEEN)];
+
+    let mut gain = [0i32; 32];
+    let target_pt = if m.flags() == FLAG_EP { PAWN } else { b.piece_on(to).map(|p| p % 6).unwrap_or(0) };
+    gain[0] = SEE_VAL[target_pt];
+    let mut moving_pt = b.piece_on(from).unwrap() % 6;
+    let mut side = b.side.flip();
+    let mut attackers = attackers_to(b, to, occ);
+    let mut d = 0;
+    loop {
+        // Remove the piece that just captured (now sitting on `to`) from the board,
+        // then see whether `side` has a piece left to recapture it. gain[d] is only
+        // computed once such an attacker is actually found — a capture that never
+        // happens must not be fed into the minimax back-substitution below.
+        occ ^= bb(from);
+        attackers &= !bb(from);
+        attackers |= (bishop_attacks(to, occ) & bishops) | (rook_attacks(to, occ) & rooks); // x-ray
+        attackers &= occ;
+        match least_valuable(b, attackers, side) {
+            Some((sq, pt)) => {
+                d += 1;
+                gain[d] = SEE_VAL[moving_pt] - gain[d - 1];
+                from = sq;
+                moving_pt = pt;
+                side = side.flip();
+            }
+            None => break,
+        }
+        if d >= 31 { break; }
+    }
+    while d > 0 { d -= 1; gain[d] = -std::cmp::max(-gain[d], gain[d + 1]); }
+    gain[0]
+}
+
 fn to_tt(s:i32,ply:i32)->i32{if s>MATE_BOUND{s+ply}else if s < -MATE_BOUND{s-ply}else{s}} fn from_tt(s:i32,ply:i32)->i32{if s>MATE_BOUND{s-ply}else if s < -MATE_BOUND{s+ply}else{s}}
 fn score_text(s:i32)->String{if s.abs()>MATE_BOUND{format!("mate {}",if s>0{(MATE-s+1)/2}else{-((MATE+s+1)/2)})}else{format!("cp {s}")}}
 fn deadline(b:&Board,l:&Limits)->Option<Instant>{if let Some(ms)=l.movetime{return Some(Instant::now()+Duration::from_millis(ms.saturating_sub(20)))}let(time,inc)=if b.side==Color::White{(l.wtime,l.winc)}else{(l.btime,l.binc)};let time=time?;Some(Instant::now()+Duration::from_millis((time/25+inc.unwrap_or(0)/2).max(10).min(time.saturating_sub(50).max(10))))}
@@ -449,6 +560,37 @@ mod tests {
         s.order_moves(&b, &mut moves, tt, 0);
 
         assert_eq!(moves, vec![tt, capture, quiet_promotion, killer, quiet]);
+    }
+
+    fn see_of(fen: &str, mv: &str) -> i32 {
+        let b = Board::from_fen(fen).unwrap();
+        let mut ms = Vec::new();
+        crate::movegen::generate(&b, &mut ms);
+        let m = ms.into_iter().find(|m| m.uci() == mv).expect("move not legal");
+        see(&b, m)
+    }
+    #[test]
+    fn see_values() {
+        // White pawn takes an undefended pawn: +100 (victim value, nothing recaptures).
+        assert_eq!(see_of("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1", "e4d5"), 100);
+        // Queen takes a pawn defended by a pawn: 100 - 900 < 0 (bad trade).
+        assert!(see_of("4k3/8/8/2p5/3p4/8/3Q4/4K3 w - - 0 1", "d2d4") < 0);
+        // Rook takes an undefended rook: +500.
+        assert_eq!(see_of("4k3/8/8/8/8/8/3r4/3RK3 w - - 0 1", "d1d2"), 500);
+        // Capturing promotion: pawn takes rook and promotes to queen; the new queen is
+        // immediately recaptured by the knight. Even so, the pawn was never a queen's
+        // worth of material to lose — it only ever cost White a pawn to win a rook, so
+        // the trade nets +500 (rook) - 100 (pawn) = +400. SEE is correctly POSITIVE
+        // here; do not "correct" this to -400 (that would require crediting the
+        // recapture as if a real queen were lost, which double-counts the promotion).
+        assert_eq!(see_of("r6k/1Pn5/8/8/8/8/8/7K w - - 0 1", "b7a8q"), 400);
+        // 3-ply exchange: Nxn (knight takes knight), pawn recaptures, and the bishop
+        // backs the pawn up: net 320 - 320 + 100 = 100 for the side that opened it.
+        assert_eq!(see_of("4k3/8/8/2p5/3n4/1N6/5B2/4K3 w - - 0 1", "b3d4"), 100);
+        // X-ray reveal: the front rook takes the bishop, the knight recaptures the
+        // rook, and the second rook — hidden behind the first on the d-file until it
+        // moves — is revealed and recaptures the knight: 330 - 500 + 320 = 150.
+        assert_eq!(see_of("4k3/8/1n6/3b4/8/8/3R4/K2R4 w - - 0 1", "d2d5"), 150);
     }
 
     #[test]
