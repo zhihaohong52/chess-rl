@@ -268,6 +268,64 @@ The accepted source is retained. PVS and the history heuristic remain
 absent; quiet-move ordering still falls back to the killer/unscored
 precedence established in Task 7. Cost: **$0**.
 
+## M1 Task 11 — ACCEPTED
+
+Task 11 adds full-window late move reductions (LMR) to `negamax`, replacing
+the single unconditional full-window recursive-call line in the move loop
+with a reduce-gated block. Right after `b.make(m)`, `gives_check =
+b.in_check(b.side)` correctly reads whether `m` gives check (at this point
+`b.side` is the opponent to move); `quiet = !m.is_capture() &&
+!m.is_promo()`; the reduction amount is `reduce = if depth >= 3 && legal > 3
+&& quiet && !in_check && !gives_check { 1 + (legal > 6) as i32 } else { 0 }`,
+reusing the pre-existing node-level `in_check` binding from Task 10. When
+`reduce > 0`, a reduced-depth probe runs first at the *same* full window
+`[-beta, -alpha]`, and the engine only re-searches at full depth — at that
+same full window again — if the reduced probe beats alpha (`reduced >
+alpha`); otherwise the reduced score is returned directly. There is no
+null-window call anywhere in the diff and no first-move special case: this
+is full-window LMR, not PVS. `self.history` push/pop bracket both possible
+recursive calls (reduced probe and full-depth re-search) unchanged. The
+frozen benchmark comparison is **644,979 nodes / 2,872,191 NPS** for the
+baseline and **195,096 nodes / 2,564,393 NPS** for the candidate: 449,883
+fewer nodes (**−69.75%**). A fresh finalizer re-bench reproduced 195,096
+nodes exactly; NPS is timing-dependent and is not an Elo claim.
+
+Validation was exact: the `lmr_still_finds_deep_tactic` regression-anchor
+test (a winning knight-fork tactic, `c3d5`, at depth 8) was added first and
+confirmed passing on the clean Task 10 baseline before the LMR change, then
+reconfirmed passing afterward — LMR's reductions plus re-search do not prune
+away the tactic. `cargo test --release` had **36 passed, 0 failed, 1
+ignored** (35 baseline + 1 new); all-target release clippy with `-D
+warnings` was clean; ignored `perft_deep` was **1 passed, 36 filtered**, its
+chained asserts confirming live startpos depth 6 = **119,060,324**. The UCI
+smoke returned `uciok`, `readyok`, and legal `bestmove b1c3`; `git diff
+--check` was clean; the diff scope was exactly `ferrum/src/search.rs`
+(+23/−1, the single deletion being the old unconditional recursive-call
+line). PVS and the history heuristic remain absent; qsearch, NMP, RFP,
+aspiration windows, and killer-move ordering are unchanged from Task 10.
+
+An initial SPRT attempt at concurrency 1 was OS-SIGKILL'd instantly with
+**0 games** completed — a transient host memory spike from other
+applications, not an engine defect; the user freed memory before the retry.
+The stub is preserved at `.superpowers/sdd/task-11-sprt-killed-attempt-1.log`
+and excluded from all accounting. The authoritative run also used
+**concurrency 1** — an environment-only override, with games remaining
+independent and the SPRT valid at the same 8+0.08 time control.
+
+The definitive normalized fastchess SPRT at 8+0.08 (concurrency 1) ended
+when **H1 was accepted** after **710 games: 100W/45L/565D**
+(100+45+565=710) for candidate versus baseline. Relative self-play SPRT
+Delta-Elo was **+26.97 ± 10.42**, and LLR **+2.95** crossed the **+2.94**
+upper boundary. This is a relative self-play development estimate, not an
+absolute anchored Elo. The definitive log has exactly one `Finished match`,
+took 03:19:15, and recorded no error, illegal-move, disconnect, crash,
+killed, or failed entry; its 1,631,781-byte PGN is consistent with the
+reported game count.
+
+The accepted source is retained. PVS and the history heuristic remain
+absent; quiet-move ordering still falls back to the killer/unscored
+precedence established in Task 7. Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -300,6 +358,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-18 | M1 Task 8 local history-heuristic experiment (rejected/reverted) | $0.00 | $0.00 |
 | 2026-07-18 | M1 Task 9 local null-move-pruning experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-19 | M1 Task 10 local RFP + eval-gated-NMP experiment (accepted) | $0.00 | $0.00 |
+| 2026-07-19 | M1 Task 11 local late-move-reductions experiment (accepted) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -319,13 +378,13 @@ A6000). Hard alerts at $10 and $20 cumulative.
 Runtime-found magic bitboards (Task 4), PVS (Task 5), and the butterfly
 history heuristic (Task 8) remain rejected and reverted under their frozen
 gates. **Task 6, aspiration windows; Task 7, killer moves; Task 9, null-move
-pruning; and Task 10, reverse futility pruning + eval-gated NMP, are
-accepted and retained**; PVS remains absent, and the history table is
-absent — quiet-move ordering falls back to the killer/unscored precedence
-established in Task 7. **Task 11, late move reductions, is next after
-review closure**, and builds on the accepted full-window negamax loop
-independently of history and does not depend on it. The remaining search
-stack is LMR and better time management, followed by the CCRL-anchored
-gauntlet for the first honest absolute rating. No magic or history retry is
-planned; any future compact redesign requires separate approval. Target:
-~2300–2500.
+pruning; Task 10, reverse futility pruning + eval-gated NMP; and Task 11,
+full-window late move reductions, are accepted and retained**; PVS remains
+absent, and the history table is absent — quiet-move ordering falls back to
+the killer/unscored precedence established in Task 7. **Task 12, late move
+pruning (move-count based), is next after review closure**, and builds on
+the accepted full-window negamax + LMR loop independently of history and
+does not depend on it. The remaining search stack is late move pruning and
+better time management, followed by the CCRL-anchored gauntlet for the
+first honest absolute rating. No magic or history retry is planned; any
+future compact redesign requires separate approval. Target: ~2300–2500.

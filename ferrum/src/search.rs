@@ -212,7 +212,23 @@ impl Searcher {
             }
             legal += 1;
             self.history.push(b.hash);
-            let score = -self.negamax(b, depth - 1, -beta, -alpha, ply + 1);
+            let gives_check = b.in_check(b.side);
+            let quiet = !m.is_capture() && !m.is_promo();
+            let reduce = if depth >= 3 && legal > 3 && quiet && !in_check && !gives_check {
+                1 + (legal > 6) as i32
+            } else {
+                0
+            };
+            let score = if reduce > 0 {
+                let reduced = -self.negamax(b, depth - 1 - reduce, -beta, -alpha, ply + 1);
+                if reduced > alpha {
+                    -self.negamax(b, depth - 1, -beta, -alpha, ply + 1)
+                } else {
+                    reduced
+                }
+            } else {
+                -self.negamax(b, depth - 1, -beta, -alpha, ply + 1)
+            };
             self.history.pop();
             b.unmake(m, undo);
             if self.stopped {
@@ -363,6 +379,12 @@ mod tests {
     fn rfp_keeps_tactics() {
         assert_eq!(best("k7/8/8/3q4/8/2N5/8/K7 w - - 0 1", 7), "c3d5");
         assert_eq!(best("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 5), "e1e8");
+    }
+
+    #[test]
+    fn lmr_still_finds_deep_tactic() {
+        // Winning knight fork must survive reductions + re-search.
+        assert_eq!(best("k7/8/8/3q4/8/2N5/8/K7 w - - 0 1", 8), "c3d5");
     }
 
     #[test]
