@@ -34,10 +34,15 @@ impl Searcher {
         self.killers = [[Move::NONE; 2]; MAX_PLY];
         self.stopped = false;
         self.history = history.to_vec();
-        self.deadline = deadline(board, limits);
+        let plan = plan_time(board, limits);
+        self.deadline = plan.map(|(_, hard)| Instant::now() + Duration::from_millis(hard));
+        let start = Instant::now();
+        let soft = plan.map(|(s, _)| s);
 
         let mut best = Move::NONE;
         let mut prev_score = 0i32;
+        let mut prev_best = Move::NONE;
+        let mut stable = 0;
         for depth in 1..=limits.depth.unwrap_or(64) {
             let score = self.aspiration(board, depth, prev_score);
             if self.stopped {
@@ -57,6 +62,18 @@ impl Searcher {
                     best.uci()
                 }
             );
+            if best == prev_best {
+                stable += 1;
+            } else {
+                stable = 0;
+                prev_best = best;
+            }
+            if let Some(soft_ms) = soft {
+                let scale = if stable >= 3 { 6 } else { 10 };   // spend ~0.6x soft when the PV is stable
+                if start.elapsed().as_millis() as u64 >= soft_ms * scale / 10 {
+                    break;
+                }
+            }
             if best == Move::NONE || score.abs() > MATE_BOUND {
                 break;
             }
@@ -405,7 +422,18 @@ pub fn see(b: &Board, m: Move) -> i32 {
 
 fn to_tt(s:i32,ply:i32)->i32{if s>MATE_BOUND{s+ply}else if s < -MATE_BOUND{s-ply}else{s}} fn from_tt(s:i32,ply:i32)->i32{if s>MATE_BOUND{s-ply}else if s < -MATE_BOUND{s+ply}else{s}}
 fn score_text(s:i32)->String{if s.abs()>MATE_BOUND{format!("mate {}",if s>0{(MATE-s+1)/2}else{-((MATE+s+1)/2)})}else{format!("cp {s}")}}
-fn deadline(b:&Board,l:&Limits)->Option<Instant>{if let Some(ms)=l.movetime{return Some(Instant::now()+Duration::from_millis(ms.saturating_sub(20)))}let(time,inc)=if b.side==Color::White{(l.wtime,l.winc)}else{(l.btime,l.binc)};let time=time?;Some(Instant::now()+Duration::from_millis((time/25+inc.unwrap_or(0)/2).max(10).min(time.saturating_sub(50).max(10))))}
+fn plan_time(b: &Board, l: &Limits) -> Option<(u64, u64)> {
+    if let Some(mt) = l.movetime {
+        let m = mt.saturating_sub(20).max(1);
+        return Some((m, m));
+    }
+    let (time, inc) = if b.side == Color::White { (l.wtime, l.winc) } else { (l.btime, l.binc) };
+    let time = time?;
+    let inc = inc.unwrap_or(0);
+    let soft = (time / 20 + inc * 3 / 4).max(1);
+    let hard = (time / 4).min(soft * 4).max(soft).min(time.saturating_sub(30).max(1));
+    Some((soft, hard))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +619,16 @@ mod tests {
         // rook, and the second rook — hidden behind the first on the d-file until it
         // moves — is revealed and recaptures the knight: 330 - 500 + 320 = 150.
         assert_eq!(see_of("4k3/8/1n6/3b4/8/8/3R4/K2R4 w - - 0 1", "d2d5"), 150);
+    }
+
+    #[test]
+    fn respects_movetime_and_returns_legal() {
+        let mut b = Board::startpos();
+        let t = std::time::Instant::now();
+        let m = Searcher::new(8).think(&mut b, &Limits { movetime: Some(50), ..Default::default() }, &[]);
+        let ms = t.elapsed().as_millis();
+        assert_ne!(m, Move::NONE);
+        assert!(ms < 400, "movetime 50ms overran badly: {ms}ms");
     }
 
     #[test]
