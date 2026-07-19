@@ -212,6 +212,12 @@ impl Searcher {
             }
             legal += 1;
             self.history.push(b.hash);
+            // Late move reductions (LMR): late quiet, non-checking moves at depth >= 3
+            // (when not already in check) get a shallower search first — reduced by
+            // 1 ply, or 2 once legal > 6. This is full-window, not PVS/null-window:
+            // both the reduced probe and the full-depth re-search use the same
+            // [-beta, -alpha] window, and the re-search only runs at full depth
+            // when the reduced score beats alpha.
             let gives_check = b.in_check(b.side);
             let quiet = !m.is_capture() && !m.is_promo();
             let reduce = if depth >= 3 && legal > 3 && quiet && !in_check && !gives_check {

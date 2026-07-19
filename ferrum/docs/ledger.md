@@ -16,6 +16,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-18 | M1 Task 8 (butterfly history heuristic) — rejected/reverted | baseline 3,166,392 / candidate 3,108,001 (−1.84%) | candidate full 34 pass/1 ignored; restored 31 pass/1 ignored; clippy clean | definitive 2,000-game SPRT: 274W/246L/1480D, relative SPRT Delta-Elo +4.86 ± 6.46 (95% CI [−1.60, +11.32]), LLR +0.99; cap reached with no boundary and CI crosses zero, so no SPRT acceptance; source restored |
 | 2026-07-18 | M1 Task 9 (null-move pruning) — accepted | baseline 3,166,392 / candidate 1,449,025 (−54.24%) | full release 34 pass/0 fail/1 ignored (31 baseline + 3 new null-move tests); deep perft; clippy clean | H1 accepted after 558 games: 120W/47L/391D, relative SPRT Delta-Elo +45.72 ± 14.48, LLR +2.97 crossed +2.94; source retained |
 | 2026-07-19 | M1 Task 10 (reverse futility pruning + eval-gated NMP) — accepted | baseline 1,449,025 / candidate 644,979 (−55.49%) | full release 35 pass/0 fail/1 ignored (34 baseline + rfp_keeps_tactics); deep perft; clippy clean | H1 accepted after 672 games: 111W/49L/512D, relative SPRT Delta-Elo +32.15 ± 11.13, LLR +2.95 crossed +2.94; source retained |
+| 2026-07-19 | M1 Task 11 (full-window late move reductions) — accepted | baseline 644,979 / candidate 195,096 (−69.75%) | full release 36 pass/0 fail/1 ignored (35 baseline + lmr_still_finds_deep_tactic); deep perft; clippy clean | H1 accepted after 710 games: 100W/45L/565D, relative SPRT Delta-Elo +26.97 ± 10.42, LLR +2.95 crossed +2.94; source retained |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -305,12 +306,13 @@ line). PVS and the history heuristic remain absent; qsearch, NMP, RFP,
 aspiration windows, and killer-move ordering are unchanged from Task 10.
 
 An initial SPRT attempt at concurrency 1 was OS-SIGKILL'd instantly with
-**0 games** completed — a transient host memory spike from other
-applications, not an engine defect; the user freed memory before the retry.
-The stub is preserved at `.superpowers/sdd/task-11-sprt-killed-attempt-1.log`
-and excluded from all accounting. The authoritative run also used
-**concurrency 1** — an environment-only override, with games remaining
-independent and the SPRT valid at the same 8+0.08 time control.
+**0 games** completed, under host memory pressure from other applications —
+not an engine defect. The stub is preserved at
+`.superpowers/sdd/task-11-sprt-killed-attempt-1.log` and excluded from all
+accounting. After the user freed memory (closing the other applications), the
+retry ran at the same **concurrency 1** and completed cleanly: the memory fix,
+not a concurrency change, resolved the failure. The SPRT remains valid — same
+binaries, same 8+0.08 time control, independent games.
 
 The definitive normalized fastchess SPRT at 8+0.08 (concurrency 1) ended
 when **H1 was accepted** after **710 games: 100W/45L/565D**
