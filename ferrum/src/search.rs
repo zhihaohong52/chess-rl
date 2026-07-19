@@ -211,6 +211,16 @@ impl Searcher {
                 continue;
             }
             legal += 1;
+            let gives_check = b.in_check(b.side);
+            let quiet = !m.is_capture() && !m.is_promo();
+            // late move pruning: skip late quiets at shallow depth once we have a real best
+            if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
+                && depth <= 3 && legal > 4 + depth * depth
+            {
+                b.unmake(m, undo);
+                legal -= 1;                 // this move was not actually searched
+                continue;
+            }
             self.history.push(b.hash);
             // Late move reductions (LMR): late quiet, non-checking moves at depth >= 3
             // (when not already in check) get a shallower search first — reduced by
@@ -218,8 +228,6 @@ impl Searcher {
             // both the reduced probe and the full-depth re-search use the same
             // [-beta, -alpha] window, and the re-search only runs at full depth
             // when the reduced score beats alpha.
-            let gives_check = b.in_check(b.side);
-            let quiet = !m.is_capture() && !m.is_promo();
             let reduce = if depth >= 3 && legal > 3 && quiet && !in_check && !gives_check {
                 1 + (legal > 6) as i32
             } else {
@@ -391,6 +399,11 @@ mod tests {
     fn lmr_still_finds_deep_tactic() {
         // Winning knight fork must survive reductions + re-search.
         assert_eq!(best("k7/8/8/3q4/8/2N5/8/K7 w - - 0 1", 8), "c3d5");
+    }
+
+    #[test]
+    fn lmp_keeps_tactics() {
+        assert_eq!(best("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 6), "e1e8");
     }
 
     #[test]
