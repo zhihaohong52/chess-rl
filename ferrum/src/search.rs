@@ -221,6 +221,14 @@ impl Searcher {
                 legal -= 1;                 // this move was not actually searched
                 continue;
             }
+            // futility pruning: skip late quiets whose static eval can't reach alpha
+            if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
+                && depth <= 4 && static_eval + 100 * depth <= alpha
+            {
+                b.unmake(m, undo);
+                legal -= 1;
+                continue;
+            }
             self.history.push(b.hash);
             // Late move reductions (LMR): late quiet, non-checking moves at depth >= 3
             // (when not already in check) get a shallower search first — reduced by
@@ -404,6 +412,11 @@ mod tests {
     #[test]
     fn lmp_keeps_tactics() {
         assert_eq!(best("6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1", 6), "e1e8");
+    }
+
+    #[test]
+    fn futility_keeps_tactics() {
+        assert_eq!(best("k7/8/8/3q4/8/2N5/8/K7 w - - 0 1", 6), "c3d5");
     }
 
     #[test]
