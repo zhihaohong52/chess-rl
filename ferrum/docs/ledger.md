@@ -19,6 +19,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-19 | M1 Task 11 (full-window late move reductions) — accepted | baseline 644,979 / candidate 195,096 (−69.75%) | full release 36 pass/0 fail/1 ignored (35 baseline + lmr_still_finds_deep_tactic); deep perft; clippy clean | H1 accepted after 710 games: 100W/45L/565D, relative SPRT Delta-Elo +26.97 ± 10.42, LLR +2.95 crossed +2.94; source retained |
 | 2026-07-19 | M1 Task 12 (late move pruning, move-count) — accepted | baseline 195,096 / candidate 161,418 (−17.26%) | full release 37 pass/0 fail/1 ignored (36 baseline + lmp_keeps_tactics); deep perft; clippy clean | H1 accepted after 798 games: 92W/43L/663D, relative SPRT Delta-Elo +21.36 ± 8.61, LLR +2.94 crossed +2.94; source retained |
 | 2026-07-21 | M1 Tasks 13–16 (futility + check ext + SEE + time mgmt) — accepted (bundle) | baseline 161,418 / candidate 79,667 (−50.65%) | 40 pass/0 fail/1 ignored; clippy clean | cumulative 620-game SPRT vs Task 12 stack: 76W/18L/526D, relative SPRT Delta-Elo +32.60 ± 9.48 (95% CI [+23.12, +42.08]), LLR +2.95 crossed +2.94; H1 accepted; source retained |
+| 2026-07-21 | M1 exit (anchored gauntlet) — **v0.2.0 NOT tagged** (short of bar) | 79,667 | 40 pass/0 fail/1 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (Stash v17/v21/v37 + Weiss 2.0, 8+0.08), Ordo fixed-anchor: **ferrum 2035.5 ± 37.7** (95% CI [1997.8, 2073.2]); bar was CI lower-bound ≥ ~2300 → **missed by ~265**; HCE eval is the ceiling, NNUE (M2) is the lever |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -458,6 +459,65 @@ invariant holds: no PVS, null-window, or first-move special case is introduced b
 futility pruning, check extensions, SEE ordering/qsearch pruning, or time
 management. Cost: **$0**.
 
+## M1 SPRT history
+
+Per-feature self-play SPRT results at 8+0.08 (relative development Elo, not
+absolute). Accepted features are retained in `search.rs`; rejected features were
+reverted with their diffs archived under `.superpowers/sdd/`.
+
+| Task | Feature | SPRT (candidate vs prior) | Verdict |
+|---|---|---|---|
+| 4 | runtime magic bitboards | frozen perf gate, no SPRT (+4.45% < 10% bar) | rejected / reverted |
+| 5 | principal variation search | +2.95 ± 6.04, LLR +0.46, cap (CI crosses 0) | rejected / reverted |
+| 6 | aspiration windows | +6.95 ± 5.86, LLR +1.86, cap (CI [+1.09, +12.81]) | accepted |
+| 7 | killer moves | +23.50 ± 10.09, LLR +2.98 crossed +2.94 | accepted |
+| 8 | butterfly history heuristic | +4.86 ± 6.46, LLR +0.99, cap (CI crosses 0) | rejected / reverted |
+| 9 | null-move pruning | +45.72 ± 14.48, LLR +2.97 crossed +2.94 | accepted |
+| 10 | reverse futility + eval-gated NMP | +32.15 ± 11.13, LLR +2.95 crossed +2.94 | accepted |
+| 11 | full-window late move reductions | +26.97 ± 10.42, LLR +2.95 crossed +2.94 | accepted |
+| 12 | late move pruning (move-count) | +21.36 ± 8.61, LLR +2.94 crossed +2.94 | accepted |
+| 13–16 | futility + check ext + SEE + time mgmt (bundle) | +32.60 ± 9.48, LLR +2.95 crossed +2.94 | accepted (bundle) |
+
+Retained search = full-window negamax (no PVS/null-window) + aspiration +
+killers + NMP + RFP + LMR + LMP + futility + check extensions + SEE + soft/hard
+time management. No history table, no magic bitboards.
+
+## M1 exit — SHORT OF BAR (v0.2.0 NOT tagged)
+
+**Bar:** ferrum's CCRL-anchored rating with the lower bound of its 95% CI ≥
+~2300 (M1 target band ~2300–2500).
+
+**Result: ferrum 2035.5 ± 37.7 (95% CI [1997.8, 2073.2]) — MISSED by ~265
+Elo.** The anchored gauntlet ran **1,120 games** at 8+0.08 (concurrency 2,
+ROUNDS 140 per opponent, **0 time-forfeits**, 02:59:59) against the pinned CCRL
+pool, rated with Ordo (`ordo -Q -W -s 1000 -F 95 -m anchors.txt`, anchors fixed
+to their CCRL blitz values, ferrum solved). White advantage fit at 120.5 ± 19.3.
+Per-anchor:
+
+| Opponent (CCRL) | ferrum W–L–D | ferrum score |
+|---|---|---|
+| stash-v17 (2296) | 18–211–51 | 15.5% |
+| stash-v21 (2713) | 4–246–30 | 6.8% |
+| weiss-2.0 (3320) | 4–253–23 | 5.5% |
+| stash-v37 (3423) | 2–263–15 | 3.4% |
+| **total** | **28–973–119** | **7.8%** (87.5/1120) |
+
+**Analysis.** Every retained M1 search feature is individually SPRT-validated and
+the stack is correct, but the absolute gain over M0 is only ~+100 CCRL
+(loosely-estimated ~1930 → anchored 2035). The closest, most informative anchor
+(stash-v17, 2296) pins ferrum at ~2000–2010; the farther anchors agree within
+the fit (error only ±37.7 over 1,120 games). The limiter is the **hand-crafted
+evaluation**: search improvements on a weak HCE top out around 2000–2100, and the
+~265-Elo gap to the bar is an eval-quality gap, not a search-depth gap.
+Search-margin tuning (LMR/LMP/futility thresholds) yields tens of Elo, not
+hundreds, so it cannot close this gap. The designed lever for 2300+ is the
+**NNUE evaluation (M2)**, which replaces HCE. The original ~2300–2500 M1 target
+was optimistic for an HCE-only engine; the honest M1 deliverable is a complete,
+SPRT-gated search stack measured at a real **2035 ± 38 CCRL**. Per the plan's
+exit rule, **`ferrum-v0.2.0` is not tagged** (bar not met); how to proceed (M2
+NNUE vs a search/eval tuning pass vs tagging a search-complete checkpoint) is a
+user decision. Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -493,6 +553,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-19 | M1 Task 11 local late-move-reductions experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-19 | M1 Task 12 local late-move-pruning experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-21 | M1 Tasks 13–16 local search-stack bundle (futility+check-ext+SEE+time-mgmt, accepted) | $0.00 | $0.00 |
+| 2026-07-21 | M1 exit anchored gauntlet (Stash×3 + Weiss + Ordo, local) — 2035 CCRL, bar missed | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -519,8 +580,10 @@ absent — quiet-move ordering falls back to the killer/unscored precedence
 established in Task 7. **Tasks 13–16 — futility pruning of shallow quiets, check
 extensions, static exchange evaluation (SEE), and soft/hard time management —
 are accepted as a bundle** (cumulative +32.60 ± 9.48 self-play Elo vs the Task
-12 stack, LLR +2.95 crossing +2.94), completing the M1 search work. The only
-remaining M1 step is **Task 17, the CCRL-anchored gauntlet** (Stash v17/v21/v37
-+ Weiss 2.0, rated with Ordo) for the first honest absolute rating.
-No magic or history retry is planned; any future compact redesign requires
-separate approval. Target: ~2300–2500.
+12 stack, LLR +2.95 crossing +2.94), completing the M1 search work. **Task 17,
+the CCRL-anchored gauntlet** (Stash v17/v21/v37 + Weiss 2.0, rated with Ordo) is
+now **complete: ferrum rates 2035 ± 38 CCRL (95% CI [1998, 2073]), short of the
+~2300 bar** — the HCE eval is the ceiling, so `ferrum-v0.2.0` is not tagged.
+No magic or history retry is planned; the path to the ~2300–2500 target is the
+**NNUE evaluation (M2)**, not further search tuning (which yields tens of Elo,
+not the ~265 needed). Any future compact redesign requires separate approval.

@@ -27,7 +27,7 @@ done
   -openings file="$BOOK" format=epd order=random \
   -rounds "$ROUNDS" -games 2 -repeat \
   -concurrency "$CONCURRENCY" \
-  -gauntlet \
+  -tournament gauntlet \
   -pgnout file="$PGN"
 
 echo "pgn: $PGN"
