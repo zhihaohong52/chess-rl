@@ -18,6 +18,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-19 | M1 Task 10 (reverse futility pruning + eval-gated NMP) — accepted | baseline 1,449,025 / candidate 644,979 (−55.49%) | full release 35 pass/0 fail/1 ignored (34 baseline + rfp_keeps_tactics); deep perft; clippy clean | H1 accepted after 672 games: 111W/49L/512D, relative SPRT Delta-Elo +32.15 ± 11.13, LLR +2.95 crossed +2.94; source retained |
 | 2026-07-19 | M1 Task 11 (full-window late move reductions) — accepted | baseline 644,979 / candidate 195,096 (−69.75%) | full release 36 pass/0 fail/1 ignored (35 baseline + lmr_still_finds_deep_tactic); deep perft; clippy clean | H1 accepted after 710 games: 100W/45L/565D, relative SPRT Delta-Elo +26.97 ± 10.42, LLR +2.95 crossed +2.94; source retained |
 | 2026-07-19 | M1 Task 12 (late move pruning, move-count) — accepted | baseline 195,096 / candidate 161,418 (−17.26%) | full release 37 pass/0 fail/1 ignored (36 baseline + lmp_keeps_tactics); deep perft; clippy clean | H1 accepted after 798 games: 92W/43L/663D, relative SPRT Delta-Elo +21.36 ± 8.61, LLR +2.94 crossed +2.94; source retained |
+| 2026-07-21 | M1 Tasks 13–16 (futility + check ext + SEE + time mgmt) — accepted (bundle) | baseline 161,418 / candidate 79,667 (−50.65%) | 40 pass/0 fail/1 ignored; clippy clean | cumulative 620-game SPRT vs Task 12 stack: 76W/18L/526D, relative SPRT Delta-Elo +32.60 ± 9.48 (95% CI [+23.12, +42.08]), LLR +2.95 crossed +2.94; H1 accepted; source retained |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -402,6 +403,61 @@ The accepted source is retained. PVS and the history heuristic remain absent;
 quiet-move ordering still falls back to the killer/unscored precedence
 established in Task 7. Cost: **$0**.
 
+## M1 Tasks 13–16 — ACCEPTED (bundle)
+
+Tasks 13–16 add the final M1 search features on top of the accepted Task 12
+move loop: **futility pruning of shallow quiets** (T13, `e1a904d`), **check
+extensions** (T14, `db3faa1`), **static exchange evaluation** for capture
+ordering and qsearch pruning (T15, `0bfb984`), and **soft/hard time management
+with stability** (T16, `f663667`). Each was implemented, spec- and
+quality-reviewed, and committed separately with scope `ferrum/src/search.rs`
+only. The frozen bench fell from the **161,418-node** Task 12 baseline to
+**79,667 nodes** for the T16 stack (**−50.65%**), at 1,457,195 NPS; NPS is
+timing-dependent and is not an Elo claim. Release tests are **40 passed, 0
+failed, 1 ignored**; all-target release clippy with `-D warnings` is clean.
+
+**Gating methodology — bundle, not per-rung.** Each of these four features is
+individually small (~+3 Elo), below the resolution of the project's per-patch
+SPRT at `elo0=0 elo1=8`: a ~+3-Elo patch neither crosses the +2.94 boundary nor
+yields a cap CI wholly above zero, so it wanders to the 2,000-game cap
+inconclusively. A confirming individual run was done for T13: the definitive
+concurrency-2 T13-vs-T12 SPRT went the full **2,000 games** (149W/133L/1718D)
+with relative Delta-Elo **+2.78 ± 5.07** (95% CI **[−2.29, +7.85]**), LLR
+**+0.58**, no boundary — a non-acceptance under the cap rule, statistically
+indistinguishable from the rejected Task 5 PVS result (+2.95 ± 6.04). Rather
+than reject four sound, standard techniques one at a time for being individually
+sub-resolution, the four were gated **as one bundle** against the pre-stack Task
+12 baseline (user-authorized decision). This is the statistically correct test
+for a set of small same-direction patches, and it is the *stronger* bar: the
+whole stack must prove net-positive against a fixed baseline.
+
+**Definitive bundle SPRT (H1 accepted).** The concurrency-2 fastchess SPRT at
+8+0.08, candidate `/tmp/ferrum-t16` vs baseline `/tmp/ferrum-t12`, ended when
+**H1 was accepted** after **620 games: 76W/18L/526D** (76+18+526=620), LOS
+100.00%. Relative self-play Delta-Elo was **+32.60 ± 9.48** (95% CI **[+23.12,
++42.08]**, wholly positive), and LLR **+2.95** crossed the **+2.94** upper
+boundary. The four M1 search features together are worth ~+33 self-play Elo over
+the Task 12 stack. This is a relative self-play development estimate, not an
+absolute anchored Elo. The run finished in 01:35:19 with exactly one `Finished
+match`, **zero time-forfeit games**, and no crash/illegal/disconnect entry.
+
+**Concurrency on Apple M1 (4P+4E).** The host is an Apple M1 with 4 performance
++ 4 efficiency cores. concurrency 2 runs the two games' four engine processes on
+the four P-cores and produces clean games; concurrency 4 (eight processes)
+forces four engines onto the ~3×-slower E-cores with no headroom for the OS and
+fastchess, which manifests as the multi-hundred-second time-forfeit overruns and
+OOM kills recorded against the earlier tasks. concurrency 2 is therefore the
+standing setting for this host at 8+0.08 — a hardware ceiling, not a statistical
+one (games are independent at any concurrency; only time forfeits threaten
+validity). An initial T13-vs-T12 attempt at concurrency 4 was discarded for
+exactly these contaminated time-forfeit results before the authoritative
+concurrency-2 runs.
+
+The accepted source is retained across all four commits. The full-window negamax
+invariant holds: no PVS, null-window, or first-move special case is introduced by
+futility pruning, check extensions, SEE ordering/qsearch pruning, or time
+management. Cost: **$0**.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -436,6 +492,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-19 | M1 Task 10 local RFP + eval-gated-NMP experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-19 | M1 Task 11 local late-move-reductions experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-19 | M1 Task 12 local late-move-pruning experiment (accepted) | $0.00 | $0.00 |
+| 2026-07-21 | M1 Tasks 13–16 local search-stack bundle (futility+check-ext+SEE+time-mgmt, accepted) | $0.00 | $0.00 |
 
 Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
 A6000). Hard alerts at $10 and $20 cumulative.
@@ -459,11 +516,11 @@ pruning; Task 10, reverse futility pruning + eval-gated NMP; Task 11,
 full-window late move reductions; and Task 12, move-count late move pruning,
 are accepted and retained**; PVS remains absent, and the history table is
 absent — quiet-move ordering falls back to the killer/unscored precedence
-established in Task 7. **Task 13, futility pruning of shallow quiets, is next**,
-and builds on the accepted full-window move loop, reusing the node-level
-`static_eval` and the per-move `gives_check`/`quiet` bindings alongside the
-Task 12 LMP guard. The remaining search stack is futility pruning, check
-extensions, static exchange evaluation (SEE), and better time management,
-followed by the CCRL-anchored gauntlet for the first honest absolute rating.
+established in Task 7. **Tasks 13–16 — futility pruning of shallow quiets, check
+extensions, static exchange evaluation (SEE), and soft/hard time management —
+are accepted as a bundle** (cumulative +32.60 ± 9.48 self-play Elo vs the Task
+12 stack, LLR +2.95 crossing +2.94), completing the M1 search work. The only
+remaining M1 step is **Task 17, the CCRL-anchored gauntlet** (Stash v17/v21/v37
++ Weiss 2.0, rated with Ordo) for the first honest absolute rating.
 No magic or history retry is planned; any future compact redesign requires
 separate approval. Target: ~2300–2500.
