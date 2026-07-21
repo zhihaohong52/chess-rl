@@ -19,7 +19,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-19 | M1 Task 11 (full-window late move reductions) — accepted | baseline 644,979 / candidate 195,096 (−69.75%) | full release 36 pass/0 fail/1 ignored (35 baseline + lmr_still_finds_deep_tactic); deep perft; clippy clean | H1 accepted after 710 games: 100W/45L/565D, relative SPRT Delta-Elo +26.97 ± 10.42, LLR +2.95 crossed +2.94; source retained |
 | 2026-07-19 | M1 Task 12 (late move pruning, move-count) — accepted | baseline 195,096 / candidate 161,418 (−17.26%) | full release 37 pass/0 fail/1 ignored (36 baseline + lmp_keeps_tactics); deep perft; clippy clean | H1 accepted after 798 games: 92W/43L/663D, relative SPRT Delta-Elo +21.36 ± 8.61, LLR +2.94 crossed +2.94; source retained |
 | 2026-07-21 | M1 Tasks 13–16 (futility + check ext + SEE + time mgmt) — accepted (bundle) | baseline 161,418 / candidate 79,667 (−50.65%) | 40 pass/0 fail/1 ignored; clippy clean | cumulative 620-game SPRT vs Task 12 stack: 76W/18L/526D, relative SPRT Delta-Elo +32.60 ± 9.48 (95% CI [+23.12, +42.08]), LLR +2.95 crossed +2.94; H1 accepted; source retained |
-| 2026-07-21 | M1 exit (anchored gauntlet) — **v0.2.0 NOT tagged** (short of bar) | 79,667 | 40 pass/0 fail/1 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (Stash v17/v21/v37 + Weiss 2.0, 8+0.08), Ordo fixed-anchor: **ferrum 2035.5 ± 37.7** (95% CI [1997.8, 2073.2]); bar was CI lower-bound ≥ ~2300 → **missed by ~265**; HCE eval is the ceiling, NNUE (M2) is the lever |
+| 2026-07-21 | M1 exit (anchored gauntlet) — **v0.2.0 tagged as search-complete checkpoint** (short of bar) | 79,667 | 40 pass/0 fail/1 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (Stash v17/v21/v37 + Weiss 2.0, 8+0.08), Ordo fixed-anchor: **ferrum 2035.5 ± 37.7** (95% CI [1997.8, 2073.2]); bar was CI lower-bound ≥ ~2300 → **missed by ~265**; HCE eval is the ceiling, NNUE (M2) is the lever |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -482,7 +482,7 @@ Retained search = full-window negamax (no PVS/null-window) + aspiration +
 killers + NMP + RFP + LMR + LMP + futility + check extensions + SEE + soft/hard
 time management. No history table, no magic bitboards.
 
-## M1 exit — SHORT OF BAR (v0.2.0 NOT tagged)
+## M1 exit — SHORT OF BAR (v0.2.0 tagged as search-complete checkpoint)
 
 **Bar:** ferrum's CCRL-anchored rating with the lower bound of its 95% CI ≥
 ~2300 (M1 target band ~2300–2500).
@@ -513,10 +513,11 @@ Search-margin tuning (LMR/LMP/futility thresholds) yields tens of Elo, not
 hundreds, so it cannot close this gap. The designed lever for 2300+ is the
 **NNUE evaluation (M2)**, which replaces HCE. The original ~2300–2500 M1 target
 was optimistic for an HCE-only engine; the honest M1 deliverable is a complete,
-SPRT-gated search stack measured at a real **2035 ± 38 CCRL**. Per the plan's
-exit rule, **`ferrum-v0.2.0` is not tagged** (bar not met); how to proceed (M2
-NNUE vs a search/eval tuning pass vs tagging a search-complete checkpoint) is a
-user decision. Cost: **$0**.
+SPRT-gated search stack measured at a real **2035 ± 38 CCRL**. The ~2300 exit
+bar was not met, so the tag does not certify that target; by explicit user
+decision **`ferrum-v0.2.0` is tagged as a search-complete checkpoint** at 2035
+CCRL, decoupled from the (optimistic) 2300 goal. Chosen direction: **M2 (NNUE
+eval)**, the designed lever for 2300+. Cost: **$0**.
 
 ## M0 exit — PASSED
 
@@ -583,7 +584,8 @@ are accepted as a bundle** (cumulative +32.60 ± 9.48 self-play Elo vs the Task
 12 stack, LLR +2.95 crossing +2.94), completing the M1 search work. **Task 17,
 the CCRL-anchored gauntlet** (Stash v17/v21/v37 + Weiss 2.0, rated with Ordo) is
 now **complete: ferrum rates 2035 ± 38 CCRL (95% CI [1998, 2073]), short of the
-~2300 bar** — the HCE eval is the ceiling, so `ferrum-v0.2.0` is not tagged.
+~2300 bar** — the HCE eval is the ceiling. `ferrum-v0.2.0` is tagged as a
+search-complete checkpoint (not as clearing 2300); the chosen next step is M2.
 No magic or history retry is planned; the path to the ~2300–2500 target is the
 **NNUE evaluation (M2)**, not further search tuning (which yields tens of Elo,
 not the ~265 needed). Any future compact redesign requires separate approval.
