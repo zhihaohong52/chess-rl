@@ -1,4 +1,4 @@
-use crate::{board::Board, eval::{Eval, Hce, MATERIAL}, movegen::generate, moves::*, nnue::Nnue, tt::*, types::*};
+use crate::{board::{Board, FeatureDelta, Undo}, eval::{Eval, Hce, MATERIAL}, movegen::generate, moves::*, nnue::{Accumulator, Nnue}, tt::*, types::*};
 use crate::attacks::{bishop_attacks, king_attacks, knight_attacks, pawn_attacks, rook_attacks};
 use std::time::{Duration, Instant};
 pub const MATE: i32 = 30_000;
@@ -8,12 +8,52 @@ const MAX_PLY: usize = 128;
 /// Which evaluator a `Searcher` currently uses. Monomorphic (no `dyn`) so `Searcher`
 /// stays a plain, cheaply-constructed struct: `Hce` is the zero-cost default, `Nnue`
 /// replaces it only once a net file is successfully loaded via `Searcher::with_net`.
-pub enum EvalKind { Hce(Hce), Nnue(Nnue) }
+///
+/// `Nnue`'s `stack` is the incrementally-maintained accumulator stack (M2 Task 5):
+/// index 0 is always the current search root's fully-refreshed accumulator, and each
+/// deeper entry is derived from the one below it by `Nnue::apply_delta` in
+/// O(changed features) — the board is never rescanned mid-search. `Hce` carries no
+/// such state; the stack machinery is a no-op for it (see `is_nnue`/`push_delta`/
+/// `pop_delta` below).
+pub enum EvalKind { Hce(Hce), Nnue { net: Nnue, stack: Vec<Accumulator> } }
 impl Eval for EvalKind {
     fn eval(&self, board: &Board) -> i32 {
         match self {
             EvalKind::Hce(e) => e.eval(board),
-            EvalKind::Nnue(e) => e.eval(board),
+            EvalKind::Nnue { net, stack } => {
+                let acc = stack.last().expect("accumulator stack empty (reset_accumulator not called?)");
+                net.eval_accumulator(acc, board.side)
+            }
+        }
+    }
+}
+impl EvalKind {
+    fn is_nnue(&self) -> bool { matches!(self, EvalKind::Nnue { .. }) }
+
+    /// Rebuilds the accumulator stack from scratch at the search root — the one
+    /// full-refresh per `think()` call. No-op for `Hce`.
+    fn reset_accumulator(&mut self, board: &Board) {
+        if let EvalKind::Nnue { net, stack } = self {
+            stack.clear();
+            stack.push(net.fresh_accumulator(board));
+        }
+    }
+
+    /// Pushes a new top-of-stack accumulator derived from the current top by
+    /// `delta`, in O(changed features). Pair with exactly one `pop_delta` per
+    /// `push_delta` (mirroring one `make`/`unmake` pair). No-op for `Hce`.
+    fn push_delta(&mut self, delta: &FeatureDelta) {
+        if let EvalKind::Nnue { net, stack } = self {
+            let mut acc = stack.last().expect("accumulator stack empty (reset_accumulator not called?)").clone();
+            net.apply_delta(&mut acc, delta, true);
+            stack.push(acc);
+        }
+    }
+
+    /// Reverses one `push_delta`. No-op for `Hce`.
+    fn pop_delta(&mut self) {
+        if let EvalKind::Nnue { stack, .. } = self {
+            stack.pop();
         }
     }
 }
@@ -41,9 +81,27 @@ impl Searcher {
     /// `Searcher` on failure — callers should keep their previous searcher (HCE) then.
     pub fn with_net(mb: usize, path: &str) -> Result<Self, String> {
         let net = Nnue::load(path)?;
-        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue(net) })
+        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new() } })
     }
     pub fn node_count(&self) -> u64 { self.nodes }
+    /// Wraps `board.make`/`board.feature_delta` so every call site in the search tree
+    /// threads the NNUE accumulator stack automatically (M2 Task 5): the delta is
+    /// read from the pre-move position, the board is made, and — only when `eval` is
+    /// actually `Nnue` — a new accumulator is pushed derived from it in O(changed
+    /// features). Pair with `unmake_move`.
+    fn make_move(&mut self, b: &mut Board, m: Move) -> Undo {
+        let delta = self.eval.is_nnue().then(|| b.feature_delta(m));
+        let undo = b.make(m);
+        if let Some(d) = &delta {
+            self.eval.push_delta(d);
+        }
+        undo
+    }
+    /// Reverses `make_move`.
+    fn unmake_move(&mut self, b: &mut Board, m: Move, undo: Undo) {
+        b.unmake(m, undo);
+        self.eval.pop_delta();
+    }
     pub fn think(
         &mut self,
         board: &mut Board,
@@ -54,6 +112,7 @@ impl Searcher {
         self.killers = [[Move::NONE; 2]; MAX_PLY];
         self.stopped = false;
         self.history = history.to_vec();
+        self.eval.reset_accumulator(board);
         let plan = plan_time(board, limits);
         self.deadline = plan.map(|(_, hard)| Instant::now() + Duration::from_millis(hard));
         let start = Instant::now();
@@ -250,9 +309,9 @@ impl Searcher {
         let mut best = -MATE - 1;
         let mut best_move = Move::NONE;
         for m in moves {
-            let undo = b.make(m);
+            let undo = self.make_move(b, m);
             if b.in_check(b.side.flip()) {
-                b.unmake(m, undo);
+                self.unmake_move(b, m, undo);
                 continue;
             }
             legal += 1;
@@ -262,7 +321,7 @@ impl Searcher {
             if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
                 && depth <= 3 && legal > 4 + depth * depth
             {
-                b.unmake(m, undo);
+                self.unmake_move(b, m, undo);
                 legal -= 1;                 // this move was not actually searched
                 continue;
             }
@@ -270,7 +329,7 @@ impl Searcher {
             if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
                 && depth <= 4 && static_eval + 100 * depth <= alpha
             {
-                b.unmake(m, undo);
+                self.unmake_move(b, m, undo);
                 legal -= 1;
                 continue;
             }
@@ -297,7 +356,7 @@ impl Searcher {
                 -self.negamax(b, depth - 1, -beta, -alpha, ply + 1)
             };
             self.history.pop();
-            b.unmake(m, undo);
+            self.unmake_move(b, m, undo);
             if self.stopped {
                 return 0;
             }
@@ -349,13 +408,13 @@ impl Searcher {
             if m.is_capture() && !m.is_promo() && see(b, m) < 0 {
                 continue;
             }
-            let u = b.make(m);
+            let u = self.make_move(b, m);
             if b.in_check(b.side.flip()) {
-                b.unmake(m, u);
+                self.unmake_move(b, m, u);
                 continue;
             }
             let score = -self.qsearch(b, -beta, -alpha);
-            b.unmake(m, u);
+            self.unmake_move(b, m, u);
             if score > alpha {
                 alpha = score;
                 if alpha >= beta {

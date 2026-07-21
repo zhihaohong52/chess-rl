@@ -32,6 +32,21 @@ pub struct NullUndo {
     halfmove: u16,
 }
 
+/// Which NNUE feature slots a move turns off/on, expressed piece-agnostically as
+/// `(color, piece_type, square)` triples — the exact information an incremental
+/// accumulator update needs (M2 Task 5), computed without any NNUE-specific
+/// knowledge here (`nnue.rs` maps each triple to a feature index per perspective).
+/// Every move type needs at most 2 removed + 2 added slots: quiet/double-push/
+/// quiet-promo use 1+1, any capture (incl. en passant, promo-capture) uses 2+1,
+/// and castling — the only case touching two own pieces — uses 2+2 (king, rook).
+///
+/// Computed from the position *before* `make` is applied; call it first.
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureDelta {
+    pub removed: [Option<(Color, usize, u8)>; 2],
+    pub added: [Option<(Color, usize, u8)>; 2],
+}
+
 #[derive(Clone)]
 pub struct Board {
     pub bb: [Bb; 12],
@@ -291,6 +306,38 @@ impl Board {
         self.hash = u.hash;
         self.halfmove = u.halfmove;
     }
+
+    /// See `FeatureDelta`. Must be called on `self` *before* `self.make(m)` — it
+    /// reads `piece_on(from)`/`piece_on(to)` against the pre-move position, mirroring
+    /// exactly the same capture-square/promo-piece/castling-rook logic `make` itself
+    /// uses (kept independent of `make` so this stays a pure, non-mutating read).
+    pub fn feature_delta(&self, m: crate::moves::Move) -> FeatureDelta {
+        use crate::moves::*;
+        let us = self.side;
+        let (from, to, flags) = (m.from(), m.to(), m.flags());
+        let piece_pt = self.piece_on(from).expect("no piece on from-square") % 6;
+
+        let mut removed = [Some((us, piece_pt, from)), None];
+        let mut added = [Some((us, if m.is_promo() { m.promo_pt() } else { piece_pt }, to)), None];
+
+        if m.is_capture() {
+            let cap_sq = if flags == FLAG_EP {
+                if us == Color::White { to - 8 } else { to + 8 }
+            } else { to };
+            let cap_pt = self.piece_on(cap_sq).expect("no captured piece") % 6;
+            removed[1] = Some((us.flip(), cap_pt, cap_sq));
+        } else if flags == FLAG_OO {
+            let (rf, rt) = if us == Color::White { (7, 5) } else { (63, 61) };
+            removed[1] = Some((us, ROOK, rf));
+            added[1] = Some((us, ROOK, rt));
+        } else if flags == FLAG_OOO {
+            let (rf, rt) = if us == Color::White { (0, 3) } else { (56, 59) };
+            removed[1] = Some((us, ROOK, rf));
+            added[1] = Some((us, ROOK, rt));
+        }
+
+        FeatureDelta { removed, added }
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +435,89 @@ mod tests {
         assert!(!kp.has_non_pawn_material(Color::White));
         let kr = Board::from_fen("k7/8/8/8/8/8/8/K3R3 w - - 0 1").unwrap();
         assert!(kr.has_non_pawn_material(Color::White));
+    }
+
+    /// Shape-level coverage for `feature_delta` (NNUE Task 5's incremental-update
+    /// input) independent of the `nnue` module: finds `uci` among the position's
+    /// legal moves and asserts the exact `removed`/`added` triples it must produce.
+    type FeatureSlots = Vec<(Color, usize, u8)>;
+    fn delta_of(fen: &str, uci: &str) -> (FeatureSlots, FeatureSlots) {
+        let b = Board::from_fen(fen).unwrap();
+        let mut ms = Vec::new();
+        crate::movegen::generate(&b, &mut ms);
+        let m = ms.into_iter().find(|m| m.uci() == uci).expect("move not legal");
+        let d = b.feature_delta(m);
+        (d.removed.into_iter().flatten().collect(), d.added.into_iter().flatten().collect())
+    }
+
+    #[test]
+    fn feature_delta_quiet_move() {
+        let (removed, added) = delta_of(STARTPOS, "e2e4");
+        assert_eq!(removed, vec![(Color::White, PAWN, sq(4, 1))]);
+        assert_eq!(added, vec![(Color::White, PAWN, sq(4, 3))]);
+    }
+
+    #[test]
+    fn feature_delta_capture() {
+        // Kiwipete: Bxb4 (e2b4... use an actual capture in the position) — Nxd5 is
+        // simplest: white knight c3 takes the black pawn... actually use the
+        // pre-verified capture e5xd7? Simplest reliable capture: Nc3xb1? Not present.
+        // Use e5xf7+ (knight takes f7 pawn) which the kiwipete perft suite recognizes.
+        let (removed, added) = delta_of(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "e5f7",
+        );
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&(Color::White, KNIGHT, sq(4, 4))));
+        assert!(removed.contains(&(Color::Black, PAWN, sq(5, 6))));
+        assert_eq!(added, vec![(Color::White, KNIGHT, sq(5, 6))]);
+    }
+
+    #[test]
+    fn feature_delta_en_passant_removes_the_captured_pawns_own_square() {
+        // "dxc6 e.p.": the captured black pawn sits on c5, not on the c6 target square.
+        let (removed, added) = delta_of("8/8/8/2pP4/8/8/8/k6K w - c6 0 1", "d5c6");
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&(Color::White, PAWN, sq(3, 4))));
+        assert!(removed.contains(&(Color::Black, PAWN, sq(2, 4)))); // c5, not c6
+        assert_eq!(added, vec![(Color::White, PAWN, sq(2, 5))]); // c6
+    }
+
+    #[test]
+    fn feature_delta_quiet_promotion() {
+        let (removed, added) = delta_of("n1n5/1P6/8/8/8/8/8/k6K w - - 0 1", "b7b8q");
+        assert_eq!(removed, vec![(Color::White, PAWN, sq(1, 6))]);
+        assert_eq!(added, vec![(Color::White, QUEEN, sq(1, 7))]);
+    }
+
+    #[test]
+    fn feature_delta_capture_promotion() {
+        let (removed, added) = delta_of("n1n5/1P6/8/8/8/8/8/k6K w - - 0 1", "b7a8q");
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&(Color::White, PAWN, sq(1, 6))));
+        assert!(removed.contains(&(Color::Black, KNIGHT, sq(0, 7))));
+        assert_eq!(added, vec![(Color::White, QUEEN, sq(0, 7))]);
+    }
+
+    #[test]
+    fn feature_delta_castling_moves_both_king_and_rook() {
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let (removed, added) = delta_of(fen, "e1g1"); // white O-O
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&(Color::White, KING, sq(4, 0))));
+        assert!(removed.contains(&(Color::White, ROOK, sq(7, 0))));
+        assert_eq!(added.len(), 2);
+        assert!(added.contains(&(Color::White, KING, sq(6, 0))));
+        assert!(added.contains(&(Color::White, ROOK, sq(5, 0))));
+
+        // Same position, black to move, for black's O-O-O.
+        let fen_black = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R b KQkq - 0 1";
+        let (removed, added) = delta_of(fen_black, "e8c8"); // black O-O-O
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&(Color::Black, KING, sq(4, 7))));
+        assert!(removed.contains(&(Color::Black, ROOK, sq(0, 7))));
+        assert_eq!(added.len(), 2);
+        assert!(added.contains(&(Color::Black, KING, sq(2, 7))));
+        assert!(added.contains(&(Color::Black, ROOK, sq(3, 7))));
     }
 }
