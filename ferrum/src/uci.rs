@@ -8,17 +8,32 @@ pub fn run() {
     let stdin = std::io::stdin();
     let mut board = Board::startpos();
     let mut history = Vec::new();
-    let mut searcher = Searcher::new(64);
+    let mut mb = 64usize;
+    let mut net_path: Option<String> = None;
+    let mut searcher = Searcher::new(mb);
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let tokens: Vec<_> = line.split_whitespace().collect();
         match tokens.first().copied() {
-            Some("uci") => println!("id name ferrum 0.1.0\nid author James\noption name Hash type spin default 64 min 1 max 4096\nuciok"),
+            Some("uci") => println!("id name ferrum 0.1.0\nid author James\noption name Hash type spin default 64 min 1 max 4096\noption name EvalFile type string default <empty>\nuciok"),
             Some("isready") => println!("readyok"),
             Some("setoption") if tokens.get(2) == Some(&"Hash") => {
-                if let Some(Ok(mb)) = tokens.get(4).map(|value| value.parse()) {
-                    searcher = Searcher::new(mb);
+                if let Some(Ok(value)) = tokens.get(4).map(|value| value.parse()) {
+                    mb = value;
+                    searcher = match &net_path {
+                        Some(path) => Searcher::with_net(mb, path).unwrap_or_else(|_| Searcher::new(mb)),
+                        None => Searcher::new(mb),
+                    };
+                }
+            }
+            Some("setoption") if tokens.get(2) == Some(&"EvalFile") => {
+                if tokens.len() > 4 {
+                    let path = tokens[4..].join(" ");
+                    match Searcher::with_net(mb, &path) {
+                        Ok(s) => { searcher = s; net_path = Some(path); }
+                        Err(e) => println!("info string failed to load EvalFile {path}: {e}"),
+                    }
                 }
             }
             Some("ucinewgame") => {

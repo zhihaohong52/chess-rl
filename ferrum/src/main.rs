@@ -9,6 +9,7 @@ mod bench;
 mod zobrist;
 mod board;
 mod eval;
+mod nnue;
 mod moves;
 mod movegen;
 mod perft;

@@ -1,9 +1,22 @@
-use crate::{board::Board, eval::{Eval, Hce, MATERIAL}, movegen::generate, moves::*, tt::*, types::*};
+use crate::{board::Board, eval::{Eval, Hce, MATERIAL}, movegen::generate, moves::*, nnue::Nnue, tt::*, types::*};
 use crate::attacks::{bishop_attacks, king_attacks, knight_attacks, pawn_attacks, rook_attacks};
 use std::time::{Duration, Instant};
 pub const MATE: i32 = 30_000;
 const MATE_BOUND: i32 = MATE - 1_000;
 const MAX_PLY: usize = 128;
+
+/// Which evaluator a `Searcher` currently uses. Monomorphic (no `dyn`) so `Searcher`
+/// stays a plain, cheaply-constructed struct: `Hce` is the zero-cost default, `Nnue`
+/// replaces it only once a net file is successfully loaded via `Searcher::with_net`.
+pub enum EvalKind { Hce(Hce), Nnue(Nnue) }
+impl Eval for EvalKind {
+    fn eval(&self, board: &Board) -> i32 {
+        match self {
+            EvalKind::Hce(e) => e.eval(board),
+            EvalKind::Nnue(e) => e.eval(board),
+        }
+    }
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -20,9 +33,16 @@ fn aspiration_retries() -> u32 {
     ASPIRATION_RETRIES.with(std::cell::Cell::get)
 }
 #[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
-pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: Hce }
+pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind }
 impl Searcher {
-    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:Hce } }
+    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce) } }
+    /// Like `new`, but loads an NNUE net from `path` and uses it in place of `Hce`.
+    /// Returns the load error (net file missing/malformed) without constructing a
+    /// `Searcher` on failure — callers should keep their previous searcher (HCE) then.
+    pub fn with_net(mb: usize, path: &str) -> Result<Self, String> {
+        let net = Nnue::load(path)?;
+        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue(net) })
+    }
     pub fn node_count(&self) -> u64 { self.nodes }
     pub fn think(
         &mut self,
