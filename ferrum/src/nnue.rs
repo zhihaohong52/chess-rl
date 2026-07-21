@@ -172,6 +172,16 @@ pub struct Accumulator {
     by_color: [Vec<i32>; 2],
 }
 
+impl Accumulator {
+    /// Copies `src`'s contents into `self`, reusing `self`'s existing heap buffers
+    /// (no allocation as long as the hidden sizes match, which they always do) — the
+    /// pool-reuse primitive `EvalKind::push_delta`/`reset_accumulator` need to advance
+    /// the search stack without a clone-then-free per node.
+    pub fn copy_from(&mut self, src: &Accumulator) {
+        for c in 0..2 { self.by_color[c].copy_from_slice(&src.by_color[c]); }
+    }
+}
+
 fn read_i16s(cursor: &mut &[u8], count: usize) -> Box<[i16]> {
     let (chunk, rest) = cursor.split_at(count * 2);
     *cursor = rest;

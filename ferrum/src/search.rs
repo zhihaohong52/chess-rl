@@ -9,51 +9,64 @@ const MAX_PLY: usize = 128;
 /// stays a plain, cheaply-constructed struct: `Hce` is the zero-cost default, `Nnue`
 /// replaces it only once a net file is successfully loaded via `Searcher::with_net`.
 ///
-/// `Nnue`'s `stack` is the incrementally-maintained accumulator stack (M2 Task 5):
-/// index 0 is always the current search root's fully-refreshed accumulator, and each
-/// deeper entry is derived from the one below it by `Nnue::apply_delta` in
-/// O(changed features) — the board is never rescanned mid-search. `Hce` carries no
-/// such state; the stack machinery is a no-op for it (see `is_nnue`/`push_delta`/
-/// `pop_delta` below).
-pub enum EvalKind { Hce(Hce), Nnue { net: Nnue, stack: Vec<Accumulator> } }
+/// `Nnue`'s `stack` is a grow-only POOL of accumulator buffers (M2 Task 6), addressed
+/// by `top` rather than truncated on every unmake: `stack[top]` is always the current
+/// node's accumulator, `stack[0]` the current search root's fully-refreshed one, and
+/// each deeper entry is derived from its parent by `Nnue::apply_delta` in O(changed
+/// features) — the board is never rescanned mid-search. `push_delta`/`pop_delta` move
+/// `top` up/down and reuse whatever buffer is already sitting at the new index instead
+/// of cloning/freeing a `Vec` per node; the pool only grows (one alloc) the first time
+/// search reaches a new max depth, which — because qsearch recurses past `MAX_PLY` —
+/// is not statically bounded, so it must stay a `Vec` and never a fixed-size array.
+/// `Hce` carries no such state; the stack machinery is a no-op for it (see
+/// `is_nnue`/`push_delta`/`pop_delta` below).
+pub enum EvalKind { Hce(Hce), Nnue { net: Nnue, stack: Vec<Accumulator>, top: usize } }
 impl Eval for EvalKind {
     fn eval(&self, board: &Board) -> i32 {
         match self {
             EvalKind::Hce(e) => e.eval(board),
-            EvalKind::Nnue { net, stack } => {
-                let acc = stack.last().expect("accumulator stack empty (reset_accumulator not called?)");
-                net.eval_accumulator(acc, board.side)
-            }
+            EvalKind::Nnue { net, stack, top } => net.eval_accumulator(&stack[*top], board.side)
         }
     }
 }
 impl EvalKind {
     fn is_nnue(&self) -> bool { matches!(self, EvalKind::Nnue { .. }) }
 
-    /// Rebuilds the accumulator stack from scratch at the search root — the one
-    /// full-refresh per `think()` call. No-op for `Hce`.
+    /// Resets to the search root's fully-refreshed accumulator at `stack[0]` — the one
+    /// full-refresh per `think()` call. Pool buffers beyond index 0 are left allocated
+    /// (NOT `.clear()`'d) so deeper plies reuse them instead of reallocating. No-op for
+    /// `Hce`.
     fn reset_accumulator(&mut self, board: &Board) {
-        if let EvalKind::Nnue { net, stack } = self {
-            stack.clear();
-            stack.push(net.fresh_accumulator(board));
+        if let EvalKind::Nnue { net, stack, top } = self {
+            *top = 0;
+            let fresh = net.fresh_accumulator(board);
+            match stack.first_mut() {
+                Some(root) => root.copy_from(&fresh),
+                None => stack.push(fresh),
+            }
         }
     }
 
-    /// Pushes a new top-of-stack accumulator derived from the current top by
-    /// `delta`, in O(changed features). Pair with exactly one `pop_delta` per
-    /// `push_delta` (mirroring one `make`/`unmake` pair). No-op for `Hce`.
+    /// Advances `top` to a new accumulator derived from the current one by `delta`, in
+    /// O(changed features). Pair with exactly one `pop_delta` per `push_delta`
+    /// (mirroring one `make`/`unmake` pair). No-op for `Hce`.
     fn push_delta(&mut self, delta: &FeatureDelta) {
-        if let EvalKind::Nnue { net, stack } = self {
-            let mut acc = stack.last().expect("accumulator stack empty (reset_accumulator not called?)").clone();
-            net.apply_delta(&mut acc, delta, true);
-            stack.push(acc);
+        if let EvalKind::Nnue { net, stack, top } = self {
+            if *top + 1 == stack.len() {
+                stack.push(stack[*top].clone()); // grows the pool once per new max depth ever reached
+            }
+            let (below, above) = stack.split_at_mut(*top + 1);
+            above[0].copy_from(&below[*top]); // reuses above[0]'s existing heap buffers, no alloc
+            net.apply_delta(&mut above[0], delta, true);
+            *top += 1;
         }
     }
 
-    /// Reverses one `push_delta`. No-op for `Hce`.
+    /// Reverses one `push_delta` by stepping `top` back down — the vacated buffer
+    /// stays in the pool for reuse, never freed. No-op for `Hce`.
     fn pop_delta(&mut self) {
-        if let EvalKind::Nnue { stack, .. } = self {
-            stack.pop();
+        if let EvalKind::Nnue { top, .. } = self {
+            *top -= 1;
         }
     }
 }
@@ -81,7 +94,7 @@ impl Searcher {
     /// `Searcher` on failure — callers should keep their previous searcher (HCE) then.
     pub fn with_net(mb: usize, path: &str) -> Result<Self, String> {
         let net = Nnue::load(path)?;
-        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new() } })
+        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 } })
     }
     pub fn node_count(&self) -> u64 { self.nodes }
     /// Wraps `board.make`/`board.feature_delta` so every call site in the search tree
