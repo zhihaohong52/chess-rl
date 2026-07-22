@@ -31,13 +31,17 @@ fi
 [ -f "$BOOK" ] || { echo "opening book missing: $BOOK (run Task 2)" >&2; exit 1; }
 
 PGN="$(mktemp -t ferrum-sprt-XXXXXX.pgn)"
+# Load an NNUE net into BOTH engines (M2+); HCE if EVALFILE unset. Search-feature
+# SPRTs MUST set this — otherwise the A/B compares HCE engines, not the real one.
+FERRUM_OPTS=(); [ -n "${EVALFILE:-}" ] && FERRUM_OPTS=( option.EvalFile="$EVALFILE" )
 echo "candidate: $CAND"
 echo "baseline:  $BASE"
+echo "evalfile:  ${EVALFILE:-<none, HCE>}"
 echo "book:      $BOOK   tc: $TC   sprt: [$ELO0,$ELO1]   cap: $((ROUNDS*2)) games"
 
 "$FASTCHESS" \
-  -engine cmd="$CAND" name=cand \
-  -engine cmd="$BASE" name=base \
+  -engine cmd="$CAND" name=cand "${FERRUM_OPTS[@]}" \
+  -engine cmd="$BASE" name=base "${FERRUM_OPTS[@]}" \
   -each tc="$TC" \
   -openings file="$BOOK" format=epd order=random \
   -rounds "$ROUNDS" -games 2 -repeat \
