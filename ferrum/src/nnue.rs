@@ -17,7 +17,8 @@ const HEADER_LEN: usize = 16;
 /// see `Searcher`'s `EvalKind::Nnue` in `search.rs` (M2 Task 5).
 pub struct Nnue {
     hidden: usize,
-    feature_weights: Box<[i16]>, // 768 * hidden, per-feature contiguous column
+    num_buckets: usize,
+    feature_weights: Box<[i16]>, // num_buckets * 768 * hidden, per-feature contiguous column
     feature_bias: Box<[i16]>,    // hidden
     output_weights: Box<[i16]>,  // 2 * hidden ("us" half then "them" half)
     output_bias: i16,
@@ -40,30 +41,35 @@ impl Nnue {
             return Err("bad magic (expected \"FeNN\")".into());
         }
         let version = bytes[4];
-        if version != 1 {
-            return Err(format!("unsupported format version {version}"));
-        }
         let hidden = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let qa = i16::from_le_bytes([bytes[8], bytes[9]]) as i32;
         let qb = i16::from_le_bytes([bytes[10], bytes[11]]) as i32;
         let scale = i16::from_le_bytes([bytes[12], bytes[13]]) as i32;
+        let num_buckets = match version {
+            1 => 1,
+            2 => u16::from_le_bytes([bytes[14], bytes[15]]) as usize,
+            _ => return Err(format!("unsupported format version {version}")),
+        };
+        if num_buckets == 0 {
+            return Err("num_buckets must be nonzero".into());
+        }
 
         let payload = &bytes[HEADER_LEN..];
-        let expected = 768 * hidden * 2 + hidden * 2 + 2 * hidden * 2 + 2;
+        let expected = num_buckets * 768 * hidden * 2 + hidden * 2 + 2 * hidden * 2 + 2;
         if payload.len() != expected {
             return Err(format!(
-                "bad payload length: got {} bytes, expected {expected} for hidden_size={hidden}",
+                "bad payload length: got {} bytes, expected {expected} for hidden_size={hidden}, num_buckets={num_buckets}",
                 payload.len()
             ));
         }
 
         let mut cursor = payload;
-        let feature_weights = read_i16s(&mut cursor, 768 * hidden);
+        let feature_weights = read_i16s(&mut cursor, num_buckets * 768 * hidden);
         let feature_bias = read_i16s(&mut cursor, hidden);
         let output_weights = read_i16s(&mut cursor, 2 * hidden);
         let output_bias = read_i16s(&mut cursor, 1)[0];
 
-        Ok(Nnue { hidden, feature_weights, feature_bias, output_weights, output_bias, qa, qb, scale })
+        Ok(Nnue { hidden, num_buckets, feature_weights, feature_bias, output_weights, output_bias, qa, qb, scale })
     }
 
     /// Builds one perspective's accumulator from scratch by scanning every piece on the
@@ -213,6 +219,8 @@ mod tests {
     /// exactly the byte layout documented in `ferrum/nnue/README.md`.
     #[allow(clippy::too_many_arguments)]
     fn encode_net(
+        version: u8,
+        num_buckets: u16,
         hidden: usize,
         feature_weights: &[i16],
         feature_bias: &[i16],
@@ -224,13 +232,13 @@ mod tests {
     ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
-        bytes.push(1); // version
+        bytes.push(version);
         bytes.push(0); // reserved
         bytes.extend_from_slice(&(hidden as u16).to_le_bytes());
         bytes.extend_from_slice(&qa.to_le_bytes());
         bytes.extend_from_slice(&qb.to_le_bytes());
         bytes.extend_from_slice(&scale.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&num_buckets.to_le_bytes());
         for w in feature_weights {
             bytes.extend_from_slice(&w.to_le_bytes());
         }
@@ -277,7 +285,7 @@ mod tests {
         let feature_bias = [1i16, 2];
         let output_weights = [2i16, 3, 4, 5];
         let output_bias = 7i16;
-        let bytes = encode_net(hidden, &feature_weights, &feature_bias, &output_weights, output_bias, 100, 10, 200);
+        let bytes = encode_net(1, 1, hidden, &feature_weights, &feature_bias, &output_weights, output_bias, 100, 10, 200);
 
         let path = std::env::temp_dir().join(format!("ferrum_nnue_test_{}.bin", std::process::id()));
         std::fs::write(&path, &bytes).unwrap();
@@ -302,6 +310,20 @@ mod tests {
         bytes[4] = 1;
         bytes[6..8].copy_from_slice(&2u16.to_le_bytes()); // hidden_size=2 expects a longer payload
         assert!(Nnue::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn from_bytes_parses_v2_bucketed_header() {
+        let hidden = 2;
+        let num_buckets = 4usize;
+        let fw = vec![0i16; num_buckets * 768 * hidden];
+        let fb = vec![0i16; hidden];
+        let ow = vec![0i16; 2 * hidden];
+        let bytes = encode_net(2, num_buckets as u16, hidden, &fw, &fb, &ow, 0, 255, 64, 400);
+        let net = Nnue::from_bytes(&bytes).expect("v2 net parses");
+        assert_eq!(net.num_buckets, num_buckets);
+        assert_eq!(net.hidden, hidden);
+        assert_eq!(net.feature_weights.len(), num_buckets * 768 * hidden);
     }
 
     #[test]
@@ -393,7 +415,7 @@ mod tests {
         }
         let feature_bias = vec![5i16; hidden];
         let output_weights = vec![1i16; 2 * hidden];
-        let bytes = encode_net(hidden, &feature_weights, &feature_bias, &output_weights, 0, 64, 1, 100);
+        let bytes = encode_net(1, 1, hidden, &feature_weights, &feature_bias, &output_weights, 0, 64, 1, 100);
         let path = std::env::temp_dir().join(format!("ferrum_nnue_inc_test_{}.bin", std::process::id()));
         std::fs::write(&path, &bytes).unwrap();
         let net = Nnue::load(path.to_str().unwrap()).unwrap();
