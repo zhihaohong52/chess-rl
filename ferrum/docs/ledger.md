@@ -23,6 +23,8 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-22 | M2 gen-0 NNUE (768→512×2→1 SCReLU) vs HCE — accepted | 79,667 (HCE bench unchanged) | 52 pass/0 fail/3 ignored; clippy clean | H1 accepted after 268 games: 139W/11L/118D, relative SPRT Delta-Elo **+180.6 ± 29.1**, LLR +2.95 crossed +2.94; net `gen0.bin` (789,522 B, sha256 `bea8eb40…`), trained on an A6000 via `bullet` over 63M ChessBench positions |
 | 2026-07-22 | M2 Tasks 5–6 (incremental accumulator + grow-only buffer pool) — accepted | 79,667 | 52 pass/0 fail/3 ignored; clippy clean; **bit-identical search** | eval speedup **~1.9× NPS** (252k→484k), guarded by an incremental==full-refresh invariant test (synthetic + real-net); **0 time-forfeits** at 8+0.08 (was 3/268) — the prerequisite for an un-deflated anchored rating |
 | 2026-07-22 | M2 exit (anchored gauntlet) — **v0.3.0 tagged (gen-0 NNUE checkpoint)** | 79,667 | 52 pass/0 fail/3 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (same 4 anchors, 8+0.08, **0 forfeits**), Ordo fixed-anchor: **ferrum 2669.3 ± 24.9** (95% CI [2644.4, 2694.2]); **+634 over the M1 HCE exit (2035)**; lands at the lower edge of the ~2700–2900 target (≈just below 2700); per-anchor ferrum score 63.7 / 50.4 / 13.4 / 15.2 % vs Stash-v17 2296 / Stash-v21 2713 / Stash-v37 3423 / Weiss 3320 |
+| 2026-07-22 | M3 gen-1 engine (net format v2 + king-bucketed index + king-move refresh) — accepted | 79,667 (gen-0 fingerprint byte-identical) | 56 pass/0 fail/4 ignored; clippy clean | Engine support for king-bucketed (`ChessBucketsMirrored`, 4-bucket) v2 nets: version-dispatch loader, bucketed feature index **byte-verified vs bullet's real mapper** (32/32), king-move accumulator full-refresh, incremental==full-refresh invariant proven with the real bucketed net; commits `1850dce`/`01ce9a5`/`aa56c6f`/`f7e748b`/`4c07019`. Reusable for a future gen-2 (new data) |
+| 2026-07-22 | M3 gen-1 net vs gen-0 — **NO IMPROVEMENT (negative result)** | — | — | Trained king-bucketed nets on the full 63M ChessBench corpus (final loss 0.0012–0.0014). **1024 hidden**: ~1.83× slower → lost at 8+0.08 (~42.5%, stopped early). **512 hidden (≈ gen-0 speed)**: SPRT vs gen-0 **−14.5 ± 21.9 Elo over 240 games (47.9%, 67% draws)** — not an improvement. Static evals near-identical to gen-0 (KRvK 348 vs 340, missing-rook −345 vs −344). **v0.3.0 (gen-0) remains the eval ceiling** for this data |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -565,6 +567,52 @@ remaining ~330 Elo to the 3000+ goal is the **gen-1 lever** (stronger net /
 better-labeled data + more search), not further gen-0 tuning. Cloud cost:
 **~$0.70** (A6000, ~47 min).
 
+## M3 — gen-1 king-bucketed NNUE — NEGATIVE (v0.3.0 stands)
+
+**Hypothesis:** a king-bucketed feature set (`ChessBucketsMirrored`, 4 buckets)
++ larger hidden layer would lift the eval past gen-0's 2669, toward ~2850–2950.
+
+**Result: no improvement over gen-0.** The engine work landed cleanly and is
+retained; the *trained net* did not beat gen-0.
+
+**Engine (retained, committed, tested).** FeNN **format v2** (version-dispatch
+loader carrying `num_buckets`); king-bucketed, horizontally-mirrored feature
+index **byte-verified against bullet's real `ChessBucketsMirrored` mapper** at
+the pinned commit (32/32 reference cases, re-run independently) and proven to
+reduce byte-for-byte to gen-0's index at bucket 0; **king-move accumulator
+refresh** (the moving side's perspective is full-refreshed when its king crosses
+a bucket/mirror boundary, incl. castling) guarded by an incremental==full-refresh
+invariant test that fails without the refresh and passes with the **real
+bucketed net**. The gen-0 (v1) path stays byte-identical throughout (startpos
+`nodes 464036`, Kiwipete `nodes 52165`). This capability is reusable for a
+future gen-2 trained on new data.
+
+**Training + SPRT (the negative part).** Converted the **full 63M** ChessBench
+corpus on an A6000 (identical to gen-0's data). Two nets, `ConstantWDL{0.0}`
+(score-only) recipe, 45 superbatches, final loss 0.0012–0.0014:
+
+| net | hidden | speed vs gen-0 | SPRT vs gen-0 (8+0.08) |
+|---|---|---|---|
+| gen-1 (1024) | 1024 | **~1.83× slower** | lost — ~42.5% early, stopped |
+| gen-1b (512) | 512 | ~0.90× (≈ parity) | **−14.5 ± 21.9 Elo, 240g, 47.9%** (35W-45L-160D, 67% draws) |
+
+**Analysis.** The 1024-hidden net is too heavy for 8+0.08 (fewer nodes/sec →
+shallower search cancels any eval gain). The 512-hidden net runs at ~gen-0 speed
+but is **statistically indistinguishable from gen-0** — and its **static evals
+are near-identical** to gen-0's (KRvK 348 vs 340, missing-rook −345 vs −344,
+KQvK depth-6 566 vs 541). The eval-architecture lever is **saturated at the
+ChessBench data ceiling**: gen-0 already trains on the full 63M Stockfish-labeled
+positions, so king-buckets add model capacity but no new signal to learn. The
+one untried recipe knob — **WDL-blending** — cannot help here either, because
+ChessBench's WDL *and* score targets both derive from the same Stockfish win%
+(blending them adds no independent information; that needs real game outcomes,
+i.e. self-play). By explicit user decision the gen-1 experiment is **closed as a
+rigorous negative**; **`ferrum-v0.3.0` (gen-0, 2669) remains the eval ceiling**.
+The remaining levers to 3000+ are **more search** and **genuinely new data**
+(self-play with Stockfish labeling) — larger, separate efforts. Cloud cost:
+**~$1.05** (A6000: convert + two training runs + SPRT idle, ~3 h, instance
+deleted).
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -604,9 +652,11 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-22 | M2 gen-0 NNUE training (ThunderCompute A6000, `bullet`, ~47 min, 63M positions) | ~$0.70 | ~$0.70 |
 | 2026-07-22 | M2 Tasks 5–6 local speedups (incremental accumulator + buffer pool) | $0.00 | ~$0.70 |
 | 2026-07-22 | M2 exit anchored gauntlet (local, 1,120 games + Ordo) — 2669 CCRL | $0.00 | ~$0.70 |
+| 2026-07-22 | M3 gen-1 training (A6000: full-corpus convert + 1024 & 512 runs + SPRT idle, ~3h) — negative result | ~$1.05 | ~$1.75 |
+| 2026-07-22 | M3 gen-1 vs gen-0 SPRT (local) — no improvement, v0.3.0 stands | $0.00 | ~$1.75 |
 
-Budget: ~$20–25 approved; **~$0.70 spent** (first cloud spend, well under the
-$10 alert). Hard alerts at $10 and $20 cumulative.
+Budget: ~$20–25 approved; **~$1.75 spent** (well under the $10 alert). Hard
+alerts at $10 and $20 cumulative.
 
 ## Config at M0
 
