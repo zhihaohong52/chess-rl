@@ -142,15 +142,15 @@ fn aspiration_retries() -> u32 {
     ASPIRATION_RETRIES.with(std::cell::Cell::get)
 }
 #[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
-pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind }
+pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind, hist: History }
 impl Searcher {
-    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce) } }
+    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce), hist: History::new() } }
     /// Like `new`, but loads an NNUE net from `path` and uses it in place of `Hce`.
     /// Returns the load error (net file missing/malformed) without constructing a
     /// `Searcher` on failure — callers should keep their previous searcher (HCE) then.
     pub fn with_net(mb: usize, path: &str) -> Result<Self, String> {
         let net = Nnue::load(path)?;
-        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 } })
+        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 }, hist: History::new() })
     }
     pub fn node_count(&self) -> u64 { self.nodes }
     /// Wraps `board.make`/`board.feature_delta` so every call site in the search tree
@@ -179,6 +179,7 @@ impl Searcher {
     ) -> Move {
         self.nodes = 0;
         self.killers = [[Move::NONE; 2]; MAX_PLY];
+        self.hist.clear();
         self.stopped = false;
         self.history = history.to_vec();
         self.eval.reset_accumulator(board);
@@ -231,14 +232,14 @@ impl Searcher {
 
     fn aspiration(&mut self, b: &mut Board, depth: u32, prev: i32) -> i32 {
         if depth < 4 || prev.abs() > MATE_BOUND {
-            return self.negamax(b, depth as i32, -MATE, MATE, 0);
+            return self.negamax(b, depth as i32, -MATE, MATE, 0, None);
         }
 
         let mut delta = 25;
         let mut alpha = prev.saturating_sub(delta).max(-MATE);
         let mut beta = prev.saturating_add(delta).min(MATE);
         loop {
-            let score = self.negamax(b, depth as i32, alpha, beta, 0);
+            let score = self.negamax(b, depth as i32, alpha, beta, 0, None);
             if self.stopped || (score > alpha && score < beta) {
                 return score;
             }
@@ -305,6 +306,7 @@ impl Searcher {
         mut alpha: i32,
         beta: i32,
         ply: i32,
+        prev_pt: Option<usize>,
     ) -> i32 {
         self.nodes += 1;
         if self.timed_out() {
@@ -377,7 +379,7 @@ impl Searcher {
             let r = 2 + depth / 4;
             let u = b.make_null();
             self.history.push(b.hash);
-            let s = -self.negamax(b, depth - 1 - r, -beta, -beta + 1, ply + 1);
+            let s = -self.negamax(b, depth - 1 - r, -beta, -beta + 1, ply + 1, None);
             self.history.pop();
             b.unmake_null(u);
             if self.stopped {
@@ -395,7 +397,10 @@ impl Searcher {
         let mut legal = 0;
         let mut best = -MATE - 1;
         let mut best_move = Move::NONE;
+        let mut tried_quiets: Vec<Move> = Vec::new();
         for m in moves {
+            let mover = b.piece_on(m.from()).unwrap();   // 0..12 piece index (pre-move)
+            let cur_pt = mover * 64 + m.to() as usize;   // piece-to index for continuation history
             let undo = self.make_move(b, m);
             if b.in_check(b.side.flip()) {
                 self.unmake_move(b, m, undo);
@@ -420,6 +425,7 @@ impl Searcher {
                 legal -= 1;
                 continue;
             }
+            if quiet { tried_quiets.push(m); }
             self.history.push(b.hash);
             // Late move reductions (LMR): late quiet, non-checking moves at depth >= 3
             // (when not already in check) get a shallower search first — reduced by
@@ -433,14 +439,14 @@ impl Searcher {
                 0
             };
             let score = if reduce > 0 {
-                let reduced = -self.negamax(b, depth - 1 - reduce, -beta, -alpha, ply + 1);
+                let reduced = -self.negamax(b, depth - 1 - reduce, -beta, -alpha, ply + 1, Some(cur_pt));
                 if reduced > alpha {
-                    -self.negamax(b, depth - 1, -beta, -alpha, ply + 1)
+                    -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
                 } else {
                     reduced
                 }
             } else {
-                -self.negamax(b, depth - 1, -beta, -alpha, ply + 1)
+                -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
             };
             self.history.pop();
             self.unmake_move(b, m, undo);
@@ -454,8 +460,22 @@ impl Searcher {
             if score > alpha {
                 alpha = score;
                 if alpha >= beta {
-                    if !m.is_capture() && !m.is_promo() {
+                    if quiet {
+                        let bonus = History::bonus(depth);
+                        self.hist.update_quiet(b.side, m.from(), m.to(), bonus);
+                        if let Some(prev) = prev_pt { self.hist.update_cont(prev, cur_pt, bonus); }
+                        for &q in &tried_quiets {
+                            if q == m { continue; }
+                            self.hist.update_quiet(b.side, q.from(), q.to(), -bonus);
+                            if let Some(prev) = prev_pt {
+                                let qpt = b.piece_on(q.from()).unwrap() * 64 + q.to() as usize;
+                                self.hist.update_cont(prev, qpt, -bonus);
+                            }
+                        }
                         self.store_killer(ply, m);
+                    } else if m.is_capture() {
+                        let victim = b.piece_on(m.to()).map(|p| p % 6).unwrap_or(PAWN);
+                        self.hist.update_capture(b.piece_on(m.from()).unwrap(), m.to(), victim, History::bonus(depth));
                     }
                     break;
                 }
@@ -632,7 +652,7 @@ mod tests {
 
     fn full_window_score(fen: &str, depth: u32) -> i32 {
         let mut board = Board::from_fen(fen).unwrap();
-        Searcher::new(1).negamax(&mut board, depth as i32, -MATE, MATE, 0)
+        Searcher::new(1).negamax(&mut board, depth as i32, -MATE, MATE, 0, None)
     }
 
     fn aspiration_score(fen: &str, depth: u32, prev: i32) -> i32 {
@@ -867,5 +887,15 @@ mod tests {
         // quiet mating knight move. With the check extension, depth 2 already finds the
         // forced mate. This test would FAIL if the check extension were reverted.
         assert_eq!(best(SMOTHERED_MATE_FEN, 2), "d5g8");
+    }
+
+    #[test]
+    fn beta_cutoff_populates_quiet_history() {
+        let mut b = Board::from_fen("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1").unwrap();
+        let mut s = Searcher::new(8);
+        s.think(&mut b, &Limits { depth: Some(6), ..Default::default() }, &[]);
+        let any = (0..64).any(|f| (0..64).any(|t| s.hist.quiet(Color::White, f as u8, t as u8) != 0
+            || s.hist.quiet(Color::Black, f as u8, t as u8) != 0));
+        assert!(any, "expected some quiet history after a real search");
     }
 }
