@@ -14,7 +14,9 @@ CONCURRENCY="${CONCURRENCY:-4}"
 FERRUM="${1:-$FERRUM_DIR/target/release/ferrum}"
 
 PGN="$(mktemp -t ferrum-gauntlet-XXXXXX.pgn)"
-ENGINES=( -engine cmd="$FERRUM" name=ferrum )
+# Optionally start ferrum with an NNUE net loaded (M2+); HCE if EVALFILE unset.
+FERRUM_OPTS=(); [ -n "${EVALFILE:-}" ] && FERRUM_OPTS=( option.EvalFile="$EVALFILE" )
+ENGINES=( -engine cmd="$FERRUM" name=ferrum "${FERRUM_OPTS[@]}" )
 for e in "$BIN"/*; do
   n="$(basename "$e")"
   [ "$n" = ordo ] && continue

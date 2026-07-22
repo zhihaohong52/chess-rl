@@ -20,6 +20,9 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-19 | M1 Task 12 (late move pruning, move-count) — accepted | baseline 195,096 / candidate 161,418 (−17.26%) | full release 37 pass/0 fail/1 ignored (36 baseline + lmp_keeps_tactics); deep perft; clippy clean | H1 accepted after 798 games: 92W/43L/663D, relative SPRT Delta-Elo +21.36 ± 8.61, LLR +2.94 crossed +2.94; source retained |
 | 2026-07-21 | M1 Tasks 13–16 (futility + check ext + SEE + time mgmt) — accepted (bundle) | baseline 161,418 / candidate 79,667 (−50.65%) | 40 pass/0 fail/1 ignored; clippy clean | cumulative 620-game SPRT vs Task 12 stack: 76W/18L/526D, relative SPRT Delta-Elo +32.60 ± 9.48 (95% CI [+23.12, +42.08]), LLR +2.95 crossed +2.94; H1 accepted; source retained |
 | 2026-07-21 | M1 exit (anchored gauntlet) — **v0.2.0 tagged as search-complete checkpoint** (short of bar) | 79,667 | 40 pass/0 fail/1 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (Stash v17/v21/v37 + Weiss 2.0, 8+0.08), Ordo fixed-anchor: **ferrum 2035.5 ± 37.7** (95% CI [1997.8, 2073.2]); bar was CI lower-bound ≥ ~2300 → **missed by ~265**; HCE eval is the ceiling, NNUE (M2) is the lever |
+| 2026-07-22 | M2 gen-0 NNUE (768→512×2→1 SCReLU) vs HCE — accepted | 79,667 (HCE bench unchanged) | 52 pass/0 fail/3 ignored; clippy clean | H1 accepted after 268 games: 139W/11L/118D, relative SPRT Delta-Elo **+180.6 ± 29.1**, LLR +2.95 crossed +2.94; net `gen0.bin` (789,522 B, sha256 `bea8eb40…`), trained on an A6000 via `bullet` over 63M ChessBench positions |
+| 2026-07-22 | M2 Tasks 5–6 (incremental accumulator + grow-only buffer pool) — accepted | 79,667 | 52 pass/0 fail/3 ignored; clippy clean; **bit-identical search** | eval speedup **~1.9× NPS** (252k→484k), guarded by an incremental==full-refresh invariant test (synthetic + real-net); **0 time-forfeits** at 8+0.08 (was 3/268) — the prerequisite for an un-deflated anchored rating |
+| 2026-07-22 | M2 exit (anchored gauntlet) — **v0.3.0 tagged (gen-0 NNUE checkpoint)** | 79,667 | 52 pass/0 fail/3 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (same 4 anchors, 8+0.08, **0 forfeits**), Ordo fixed-anchor: **ferrum 2669.3 ± 24.9** (95% CI [2644.4, 2694.2]); **+634 over the M1 HCE exit (2035)**; lands at the lower edge of the ~2700–2900 target (≈just below 2700); per-anchor ferrum score 63.7 / 50.4 / 13.4 / 15.2 % vs Stash-v17 2296 / Stash-v21 2713 / Stash-v37 3423 / Weiss 3320 |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -519,6 +522,49 @@ decision **`ferrum-v0.2.0` is tagged as a search-complete checkpoint** at 2035
 CCRL, decoupled from the (optimistic) 2300 goal. Chosen direction: **M2 (NNUE
 eval)**, the designed lever for 2300+. Cost: **$0**.
 
+## M2 exit — gen-0 NNUE (v0.3.0 tagged as gen-0 checkpoint)
+
+**Target (projected):** ~2700–2900 CCRL from a gen-0 768→512×2→1 SCReLU
+perspective net replacing HCE.
+
+**Result: ferrum 2669.3 ± 24.9 (95% CI [2644.4, 2694.2]) — a +634 Elo jump
+over the M1 HCE exit (2035).** Same 1,120-game anchored gauntlet as M1 (4 pinned
+CCRL anchors, 8+0.08, concurrency 2, 280 games/anchor, **0 time-forfeits**),
+Ordo fixed-anchor fit (`ordo -Q -W -s 1000 -n 4 -F 95 -m anchors.txt`, White
+advantage 92.5 ± 12.5). Raw PGN + Ordo output archived under
+`bench/anchors/results/`. Per-anchor (ferrum perspective):
+
+| Opponent (CCRL) | ferrum W–L–D | ferrum score |
+|---|---|---|
+| stash-v17 (2296) | 125–48–107 | 63.8% |
+| stash-v21 (2713) | 77–75–128 | 50.4% |
+| weiss-2.0 (3320) | 11–206–63 | 15.2% |
+| stash-v37 (3423) | 25–230–25 | 13.4% |
+| **total** | **238–559–323** | **35.7%** (399.5/1120) |
+
+**Analysis.** The gen-0 NNUE is the single largest gain in the project: +634
+CCRL over the entire M1 HCE search stack, from swapping the evaluation alone.
+The self-play SPRT (+180.6 ± 29.1 vs HCE) *understated* the anchored gain —
+self-play compresses, and the M1 number was HCE-anchored — so the true lever
+size only shows against the external pool. The landing point (2669 ± 25) sits at
+the **lower edge of the projected 2700–2900 band, ~just below 2700**; the CI is
+wholly under 2700, so this does not certify the band, but the milestone (a
+working, fast, forfeit-free gen-0 NNUE with a decisive rating jump) is met. The
+per-anchor fits are internally inconsistent — ferrum beats stash-v17 (2296) at
+63.8% (implying ~2394) yet holds stash-v21 (2713) even (implying ~2716) — a
+~320-Elo spread that reflects anchor mis-calibration to our 8+0.08 M1-Mac
+conditions rather than statistical noise (±25 over 1,120 games); Ordo's MLE
+reconciles them to 2669. This is the same known caveat as M1 and the method is
+identical, so 2035 → 2669 is a valid apples-to-apples comparison. **Tasks 5–6**
+(incremental accumulator + grow-only buffer pool) delivered a **~1.9× eval
+speedup** with **bit-identical search** (proven by an incremental==full-refresh
+invariant test and A/B node-count matching), eliminating the 3/268 full-refresh
+time-forfeits so the rating is un-deflated. By explicit user decision
+**`ferrum-v0.3.0` is tagged as the gen-0 NNUE checkpoint** at 2669 CCRL. The
+remaining ~330 Elo to the 3000+ goal is the **gen-1 lever** (stronger net /
+better-labeled data + more search), not further gen-0 tuning. Cloud cost:
+**~$0.70** (A6000, ~47 min).
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -555,9 +601,12 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-19 | M1 Task 12 local late-move-pruning experiment (accepted) | $0.00 | $0.00 |
 | 2026-07-21 | M1 Tasks 13–16 local search-stack bundle (futility+check-ext+SEE+time-mgmt, accepted) | $0.00 | $0.00 |
 | 2026-07-21 | M1 exit anchored gauntlet (Stash×3 + Weiss + Ordo, local) — 2035 CCRL, bar missed | $0.00 | $0.00 |
+| 2026-07-22 | M2 gen-0 NNUE training (ThunderCompute A6000, `bullet`, ~47 min, 63M positions) | ~$0.70 | ~$0.70 |
+| 2026-07-22 | M2 Tasks 5–6 local speedups (incremental accumulator + buffer pool) | $0.00 | ~$0.70 |
+| 2026-07-22 | M2 exit anchored gauntlet (local, 1,120 games + Ordo) — 2669 CCRL | $0.00 | ~$0.70 |
 
-Budget: ~$20–25 approved. Cloud spend begins at M2 (gen-0 NNUE training on an
-A6000). Hard alerts at $10 and $20 cumulative.
+Budget: ~$20–25 approved; **~$0.70 spent** (first cloud spend, well under the
+$10 alert). Hard alerts at $10 and $20 cumulative.
 
 ## Config at M0
 
