@@ -1,0 +1,7 @@
+/target
+
+# built anchor engines + rating tool (reproducible via bench/anchors/README.md)
+bench/anchors/bin/
+# fastchess run artifacts written into the crate dir
+config.json
+*.pgn

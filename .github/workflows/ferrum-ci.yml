@@ -1,0 +1,18 @@
+name: ferrum-ci
+on:
+  push:
+    paths: ['ferrum/**', '.github/workflows/ferrum-ci.yml']
+  pull_request:
+    paths: ['ferrum/**', '.github/workflows/ferrum-ci.yml']
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ferrum
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component clippy
+      - run: cargo clippy --all-targets --release -- -D warnings
+      - run: cargo test --release
+      - run: cargo run --release -- bench

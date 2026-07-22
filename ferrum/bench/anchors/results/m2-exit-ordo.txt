@@ -1,0 +1,11 @@
+
+   # PLAYER       :  RATING  ERROR  POINTS  PLAYED   (%)
+   1 stash-v37    :  3423.0   ----   242.5     280    87
+   2 weiss-2.0    :  3320.0   ----   237.5     280    85
+   3 stash-v21    :  2713.0   ----   139.0     280    50
+   4 ferrum       :  2669.3   24.9   399.5    1120    36
+   5 stash-v17    :  2296.0   ----   101.5     280    36
+
+White advantage = 92.49 +/- 12.48
+Draw rate (equal opponents) = 50.00 % +/- 0.00
+
