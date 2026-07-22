@@ -74,6 +74,59 @@ impl EvalKind {
     }
 }
 
+/// Move-ordering history (M4 B1). Three independent gravity-updated tables:
+/// main quiet `[color][from][to]`, 1-ply continuation `[prev_piece_to][cur_piece_to]`
+/// (piece-to index = piece(0..12)*64 + to(0..64)), and capture `[piece][to][captured_pt]`.
+/// Entries stay in (-MAX, MAX) via the gravity update. Not the `Searcher::history`
+/// field (that is the repetition hash list).
+pub struct History {
+    main: Vec<i32>,    // len 2*64*64
+    cont: Vec<i32>,    // len 768*768
+    capture: Vec<i32>, // len 12*64*6
+}
+impl History {
+    pub const MAX: i32 = 16_384;
+    pub const BONUS_CAP: i32 = 1_200;
+
+    pub fn new() -> Self {
+        History { main: vec![0; 2 * 64 * 64], cont: vec![0; 768 * 768], capture: vec![0; 12 * 64 * 6] }
+    }
+    pub fn clear(&mut self) {
+        self.main.iter_mut().for_each(|e| *e = 0);
+        self.cont.iter_mut().for_each(|e| *e = 0);
+        self.capture.iter_mut().for_each(|e| *e = 0);
+    }
+    /// Depth-scaled cutoff bonus, capped.
+    pub fn bonus(depth: i32) -> i32 { (16 * depth * depth).min(Self::BONUS_CAP) }
+
+    fn apply(entry: &mut i32, delta: i32) {
+        // Gravity: pulls toward 0 proportionally so |entry| stays < MAX. The raw
+        // update can still land exactly on +/-MAX due to integer-division truncation
+        // (e.g. repeated same-sign deltas converge there and then freeze), so clamp
+        // to the open interval to preserve the invariant.
+        *entry += delta - *entry * delta.abs() / Self::MAX;
+        *entry = (*entry).clamp(-(Self::MAX - 1), Self::MAX - 1);
+    }
+
+    fn main_idx(c: Color, from: u8, to: u8) -> usize { (c.idx() * 64 + from as usize) * 64 + to as usize }
+    pub fn quiet(&self, c: Color, from: u8, to: u8) -> i32 { self.main[Self::main_idx(c, from, to)] }
+    pub fn update_quiet(&mut self, c: Color, from: u8, to: u8, delta: i32) {
+        let i = Self::main_idx(c, from, to); Self::apply(&mut self.main[i], delta);
+    }
+
+    pub fn cont(&self, prev: usize, cur: usize) -> i32 { self.cont[prev * 768 + cur] }
+    pub fn update_cont(&mut self, prev: usize, cur: usize, delta: i32) {
+        let i = prev * 768 + cur; Self::apply(&mut self.cont[i], delta);
+    }
+
+    fn cap_idx(piece: usize, to: u8, victim_pt: usize) -> usize { (piece * 64 + to as usize) * 6 + victim_pt }
+    pub fn capture(&self, piece: usize, to: u8, victim_pt: usize) -> i32 { self.capture[Self::cap_idx(piece, to, victim_pt)] }
+    pub fn update_capture(&mut self, piece: usize, to: u8, victim_pt: usize, delta: i32) {
+        let i = Self::cap_idx(piece, to, victim_pt); Self::apply(&mut self.capture[i], delta);
+    }
+}
+impl Default for History { fn default() -> Self { Self::new() } }
+
 #[cfg(test)]
 std::thread_local! {
     static ASPIRATION_RETRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -585,6 +638,35 @@ mod tests {
     fn aspiration_score(fen: &str, depth: u32, prev: i32) -> i32 {
         let mut board = Board::from_fen(fen).unwrap();
         Searcher::new(1).aspiration(&mut board, depth, prev)
+    }
+
+    #[test]
+    fn history_gravity_is_bounded_and_directional() {
+        let mut h = History::new();
+        for _ in 0..1000 { h.update_quiet(Color::White, 12, 28, 900); }
+        let hi = h.quiet(Color::White, 12, 28);
+        assert!(hi > 0 && hi < History::MAX, "saturated entry {hi} left (0, MAX)");
+        let before = h.quiet(Color::White, 12, 28);
+        h.update_quiet(Color::White, 12, 28, -900);
+        assert!(h.quiet(Color::White, 12, 28) < before, "malus must decrease the entry");
+        assert_eq!(h.quiet(Color::White, 11, 27), 0);
+    }
+
+    #[test]
+    fn history_bonus_scales_with_depth_and_caps() {
+        assert!(History::bonus(8) > History::bonus(3), "deeper cutoff earns more");
+        assert!(History::bonus(64) <= History::BONUS_CAP, "bonus is capped");
+    }
+
+    #[test]
+    fn continuation_and_capture_history_are_separate_axes() {
+        let mut h = History::new();
+        h.update_cont(5, 20, 700);
+        assert!(h.cont(5, 20) > 0);
+        assert_eq!(h.cont(6, 20), 0);
+        h.update_capture(1, 28, PAWN, 700);
+        assert!(h.capture(1, 28, PAWN) > 0);
+        assert_eq!(h.capture(1, 28, KNIGHT), 0);
     }
 
     #[test]
