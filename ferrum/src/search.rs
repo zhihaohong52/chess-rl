@@ -48,16 +48,19 @@ impl EvalKind {
     }
 
     /// Advances `top` to a new accumulator derived from the current one by `delta`, in
-    /// O(changed features). Pair with exactly one `pop_delta` per `push_delta`
-    /// (mirroring one `make`/`unmake` pair). No-op for `Hce`.
-    fn push_delta(&mut self, delta: &FeatureDelta) {
+    /// O(changed features) -- except on a king move, where the moving side's
+    /// perspective is instead refreshed from `board` (bucketed nets only; see
+    /// `Nnue::apply_delta_bucketed`). `board` must be the position AFTER the move
+    /// (post-`make`). Pair with exactly one `pop_delta` per `push_delta` (mirroring
+    /// one `make`/`unmake` pair). No-op for `Hce`.
+    fn push_delta(&mut self, delta: &FeatureDelta, board: &Board) {
         if let EvalKind::Nnue { net, stack, top } = self {
             if *top + 1 == stack.len() {
                 stack.push(stack[*top].clone()); // grows the pool once per new max depth ever reached
             }
             let (below, above) = stack.split_at_mut(*top + 1);
             above[0].copy_from(&below[*top]); // reuses above[0]'s existing heap buffers, no alloc
-            net.apply_delta(&mut above[0], delta, true);
+            net.apply_delta_bucketed(&mut above[0], delta, board, true);
             *top += 1;
         }
     }
@@ -106,7 +109,7 @@ impl Searcher {
         let delta = self.eval.is_nnue().then(|| b.feature_delta(m));
         let undo = b.make(m);
         if let Some(d) = &delta {
-            self.eval.push_delta(d);
+            self.eval.push_delta(d, b); // `b` is now the post-make board, as `push_delta` requires
         }
         undo
     }

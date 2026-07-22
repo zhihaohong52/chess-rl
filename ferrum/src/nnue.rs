@@ -207,6 +207,48 @@ impl Nnue {
         }
     }
 
+    /// Bucketed, board-aware incremental update. `board` is the position AFTER the
+    /// move (for `forward`; BEFORE it for the reverse direction) — the state whose
+    /// accumulator we're producing. `apply_delta`'s plain `feature_index` path is only
+    /// correct when neither perspective's king context (bucket/mirror) changes; a king
+    /// move is the only thing that can change a king context, so whichever
+    /// perspective's OWN king moved gets a full refresh straight from `board`, while
+    /// the other perspective still updates incrementally with its (unchanged) king
+    /// context. The non-moving perspective's king didn't move, so its king context is
+    /// unchanged by this move and equals what the parent accumulator used — indexing
+    /// the ≤4 changed pieces with it is correct. Refreshing the moving perspective on
+    /// ANY king move (even one that stays within the same bucket) is always correct
+    /// and simpler than diffing buckets; king moves are rare enough that the O(all
+    /// pieces) refresh cost doesn't matter. For v1 nets (`num_buckets == 1`, no
+    /// buckets/mirroring at all) this delegates straight to `apply_delta`.
+    pub fn apply_delta_bucketed(&self, acc: &mut Accumulator, delta: &FeatureDelta, board: &Board, forward: bool) {
+        if self.num_buckets == 1 {
+            return self.apply_delta(acc, delta, forward);
+        }
+        let king_moved = delta
+            .removed
+            .iter()
+            .flatten()
+            .chain(delta.added.iter().flatten())
+            .find(|(_, pt, _)| *pt == KING)
+            .map(|&(c, _, _)| c);
+        for perspective in [Color::White, Color::Black] {
+            if king_moved == Some(perspective) {
+                acc.by_color[perspective.idx()] = self.accumulate(board, perspective);
+            } else {
+                let (bucket, mirror) = Nnue::king_context(board.king_sq(perspective), perspective);
+                let (off, on) = if forward { (&delta.removed, &delta.added) } else { (&delta.added, &delta.removed) };
+                let a = &mut acc.by_color[perspective.idx()];
+                for &(color, pt, sq) in off.iter().flatten() {
+                    self.toggle_feature(a, Nnue::feature_index_bucketed(perspective, bucket, mirror, color, pt, sq), false);
+                }
+                for &(color, pt, sq) in on.iter().flatten() {
+                    self.toggle_feature(a, Nnue::feature_index_bucketed(perspective, bucket, mirror, color, pt, sq), true);
+                }
+            }
+        }
+    }
+
     /// Runs the forward pass directly against an already-built `Accumulator`,
     /// without touching the board at all — the O(1) read that replaces `eval()`'s
     /// full refresh on the search hot path. Bit-identical to `eval()` given an `acc`
@@ -571,6 +613,7 @@ mod tests {
         crate::movegen::generate(b, &mut moves);
         for m in moves {
             let delta = b.feature_delta(m); // must be read before `make` mutates the board
+            let king_moved = delta.removed.iter().flatten().chain(delta.added.iter().flatten()).any(|&(_, pt, _)| pt == KING);
             let undo = b.make(m);
             if b.in_check(b.side.flip()) {
                 b.unmake(m, undo);
@@ -578,49 +621,51 @@ mod tests {
             }
 
             let mut child = acc.clone();
-            net.apply_delta(&mut child, &delta, true);
+            net.apply_delta_bucketed(&mut child, &delta, b, true);
             check_incremental_matches_refresh(net, b, &child, depth - 1);
 
-            let mut restored = child.clone();
-            net.apply_delta(&mut restored, &delta, false);
-            assert_eq!(restored.by_color[0], acc.by_color[0], "reverse apply_delta diverged (white) for {}", m.uci());
-            assert_eq!(restored.by_color[1], acc.by_color[1], "reverse apply_delta diverged (black) for {}", m.uci());
+            // A king move's refresh can't be reversed from the delta alone (the
+            // pre-move king context is gone once `b` has moved past it), and the
+            // real search never reverse-deltas anyway (it pops the accumulator
+            // pool instead) -- so only check reverse-restoration when no king
+            // moved, where `b`'s (post-move) king context for both perspectives
+            // still equals what the parent accumulator used.
+            if !king_moved {
+                let mut restored = child.clone();
+                net.apply_delta_bucketed(&mut restored, &delta, b, false);
+                assert_eq!(restored.by_color[0], acc.by_color[0], "reverse apply_delta diverged (white) for {}", m.uci());
+                assert_eq!(restored.by_color[1], acc.by_color[1], "reverse apply_delta diverged (black) for {}", m.uci());
+            }
 
             b.unmake(m, undo);
         }
     }
 
-    // Shared fixture positions covering every move type `apply_delta` must handle:
-    // quiets/captures (all four), both castlings (kiwipete), quiet promotion +
-    // capture-promotion (both directions, from the same square), and en passant.
-    const INCREMENTAL_TEST_FENS: [&str; 4] = [
+    // Shared fixture positions covering every move type `apply_delta_bucketed` must
+    // handle: quiets/captures (all four), both castlings (kiwipete), quiet promotion +
+    // capture-promotion (both directions, from the same square), en passant, and —
+    // the case gen-0's plain incremental path couldn't handle — king moves (including
+    // castling) that cross a king bucket and/or the mirror line.
+    const INCREMENTAL_TEST_FENS: [&str; 7] = [
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", // kiwipete
-        "n1n5/1P6/8/8/8/8/8/k6K w - - 0 1", // quiet promo + capture-promo
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", // kiwipete: castling both sides
+        "n1n5/1P6/8/8/8/8/8/k6K w - - 0 1", // promo + capture-promo
         "8/8/8/2pP4/8/8/8/k6K w - c6 0 1",  // en passant
+        "4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1", // white O-O/O-O-O: king e1->g1/c1 (bucket + mirror change)
+        "8/8/8/3k4/8/4K3/8/8 w - - 0 1",    // both kings roam across buckets/mirror
+        "4k3/8/8/8/8/8/8/3K4 w - - 0 1",    // kings sit ON the d/e mirror boundary, far apart: a
+                                            // single lateral step (d1-e1, e8-d8) crosses the mirror
     ];
 
     #[test]
     fn incremental_accumulator_matches_full_refresh_synthetic() {
-        // A cheap synthetic net (no gen0.bin needed) so this guards the incremental
-        // logic even in contexts where the real net isn't present. Every feature
-        // weight is distinct and nonzero so a wrong perspective/is_enemy/view_sq
+        // A cheap synthetic BUCKETED net (no gen0.bin needed) so this guards the
+        // incremental logic -- including the king-move bucket/mirror refresh path --
+        // even in contexts where the real net isn't present. Every feature weight is
+        // distinct and nonzero so a wrong perspective/is_enemy/view_sq/bucket/mirror
         // index is overwhelmingly likely to produce a visible mismatch rather than
         // accidentally cancel out.
-        let hidden = 3;
-        let mut feature_weights = vec![0i16; 768 * hidden];
-        for f in 0..768 {
-            for h in 0..hidden {
-                feature_weights[f * hidden + h] = (((f * 7 + h * 3 + 1) % 200) as i16) - 100;
-            }
-        }
-        let feature_bias = vec![5i16; hidden];
-        let output_weights = vec![1i16; 2 * hidden];
-        let bytes = encode_net(1, 1, hidden, &feature_weights, &feature_bias, &output_weights, 0, 64, 1, 100);
-        let path = std::env::temp_dir().join(format!("ferrum_nnue_inc_test_{}.bin", std::process::id()));
-        std::fs::write(&path, &bytes).unwrap();
-        let net = Nnue::load(path.to_str().unwrap()).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        let net = synthetic_bucketed_net(NUM_BUCKETS, 3);
 
         for fen in INCREMENTAL_TEST_FENS {
             let mut b = Board::from_fen(fen).unwrap();
