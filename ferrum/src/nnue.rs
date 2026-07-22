@@ -686,4 +686,20 @@ mod tests {
             check_incremental_matches_refresh(&net, &mut b, &acc, 3);
         }
     }
+
+    #[test]
+    #[ignore = "requires ferrum/nnue/gen1.bin (the trained king-bucketed net, present locally)"]
+    fn incremental_accumulator_matches_full_refresh_real_gen1_net() {
+        // Same invariant as above but against the REAL bucketed gen-1 net: exercises the
+        // king-move accumulator refresh (Task 4) with the actual trained weights over
+        // fixtures that cross buckets/mirror and castle.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/nnue/gen1.bin");
+        let net = Nnue::load(path).expect("gen1.bin should parse");
+        assert!(net.num_buckets > 1, "gen1.bin must be a bucketed v2 net");
+        for fen in INCREMENTAL_TEST_FENS {
+            let mut b = Board::from_fen(fen).unwrap();
+            let acc = net.fresh_accumulator(&b);
+            check_incremental_matches_refresh(&net, &mut b, &acc, 3);
+        }
+    }
 }
