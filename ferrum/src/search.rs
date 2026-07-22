@@ -257,11 +257,29 @@ impl Searcher {
         if self.timed_out() {
             return 0;
         }
-        if ply > 0 && (b.halfmove >= 100 || self.repeated(b.hash)) {
+        if ply > 0 && self.repeated(b.hash) {
+            return 0; // repetition draw (a repeated position can't be checkmate)
+        }
+        if ply > 0 && b.halfmove >= 100 {
+            // Fifty-move draw — but checkmate takes precedence over the draw claim: if
+            // the move that tripped the clock delivers mate, score it as mate, not a draw.
+            if b.in_check(b.side) {
+                let mut ms = Vec::new();
+                generate(b, &mut ms);
+                let mated = !ms.iter().any(|&m| {
+                    let u = b.make(m);
+                    let ok = !b.in_check(b.side.flip());
+                    b.unmake(m, u);
+                    ok
+                });
+                if mated {
+                    return -MATE + ply;
+                }
+            }
             return 0;
         }
         if ply >= MAX_PLY as i32 {
-            return self.qsearch(b, alpha, beta);
+            return self.qsearch(b, alpha, beta, ply);
         }
         let in_check = b.in_check(b.side);
         // Check extension: search one ply deeper when the side to move is in check, so
@@ -270,7 +288,7 @@ impl Searcher {
         // by the `ply >= MAX_PLY` guard above, so it cannot runaway.
         let depth = if in_check { depth + 1 } else { depth };
         if depth <= 0 {
-            return self.qsearch(b, alpha, beta);
+            return self.qsearch(b, alpha, beta, ply);
         }
 
         let alpha0 = alpha;
@@ -404,24 +422,32 @@ impl Searcher {
         self.tt.store(b.hash, best_move, to_tt(best, ply), depth as i8, bound);
         best
     }
-    fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32) -> i32 {
+    fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32, ply: i32) -> i32 {
         self.nodes += 1;
         if self.timed_out() {
             return 0;
         }
-        let stand = self.eval.eval(b);
-        if stand >= beta {
-            return stand;
-        }
-        if stand > alpha {
-            alpha = stand;
-        }
+        // When the side to move is in check, standing pat is illegal and a captures/promos-
+        // only list omits the quiet evasions (king walks, interpositions) that resolve the
+        // check — so search EVERY legal move here and, if none exist, report checkmate.
+        // Otherwise, the usual stand-pat qsearch over captures/promotions.
+        let in_check = b.in_check(b.side);
         let mut moves = Vec::new();
         generate(b, &mut moves);
-        moves.retain(|m| m.is_capture() || m.is_promo());
+        if !in_check {
+            let stand = self.eval.eval(b);
+            if stand >= beta {
+                return stand;
+            }
+            if stand > alpha {
+                alpha = stand;
+            }
+            moves.retain(|m| m.is_capture() || m.is_promo());
+        }
         order(b, &mut moves, Move::NONE);
+        let mut legal = 0;
         for m in moves {
-            if m.is_capture() && !m.is_promo() && see(b, m) < 0 {
+            if !in_check && m.is_capture() && !m.is_promo() && see(b, m) < 0 {
                 continue;
             }
             let u = self.make_move(b, m);
@@ -429,7 +455,8 @@ impl Searcher {
                 self.unmake_move(b, m, u);
                 continue;
             }
-            let score = -self.qsearch(b, -beta, -alpha);
+            legal += 1;
+            let score = -self.qsearch(b, -beta, -alpha, ply + 1);
             self.unmake_move(b, m, u);
             if score > alpha {
                 alpha = score;
@@ -437,6 +464,9 @@ impl Searcher {
                     break;
                 }
             }
+        }
+        if in_check && legal == 0 {
+            return -MATE + ply; // checkmated — no legal evasion exists
         }
         alpha
     }
@@ -565,6 +595,24 @@ mod tests {
     #[test]
     fn takes_free_queen() {
         assert_eq!(best(WINNING_CAPTURE_FEN, 4), "c3d5");
+    }
+
+    #[test]
+    fn checkmate_overrides_fifty_move_draw() {
+        // Clock at 99: the mating move Ra8# trips halfmove to 100. Checkmate takes
+        // precedence over the fifty-move draw claim, so the search must still play the
+        // mate instead of a quiet move (which it would if the child scored as a draw).
+        assert_eq!(best("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 99 1", 4), "a1a8");
+    }
+
+    #[test]
+    fn qsearch_reports_checkmate() {
+        // Black is checkmated (Ra8#, king smothered by its own f7/g7/h7 pawns). Reached
+        // in check, qsearch must search evasions, find none, and return a mate score —
+        // not stand pat on the (materially rosy) static eval.
+        let mut b = Board::from_fen("R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1").unwrap();
+        let score = Searcher::new(1).qsearch(&mut b, -MATE, MATE, 0);
+        assert!(score <= -MATE_BOUND, "checkmated side must get a mate score, got {score}");
     }
 
     #[test]

@@ -80,6 +80,12 @@ impl Nnue {
         if num_buckets == 0 {
             return Err("num_buckets must be nonzero".into());
         }
+        // `forward` divides by `qa` and `qa*qb`, and `screlu` calls `clamp(0, qa)`
+        // (which panics if `qa < 0`); a zero/negative divisor from a malformed header
+        // must fail here, at the load boundary, rather than panic mid-search.
+        if qa <= 0 || qb <= 0 {
+            return Err(format!("invalid quantization divisors: qa={qa}, qb={qb} (both must be positive)"));
+        }
 
         let payload = &bytes[HEADER_LEN..];
         let expected = num_buckets * 768 * hidden * 2 + hidden * 2 + 2 * hidden * 2 + 2;
@@ -418,6 +424,20 @@ mod tests {
         bytes[4] = 1;
         bytes[6..8].copy_from_slice(&2u16.to_le_bytes()); // hidden_size=2 expects a longer payload
         assert!(Nnue::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn from_bytes_rejects_nonpositive_quantization() {
+        // A well-sized header with qa/qb <= 0 must be rejected at load, not panic in
+        // `forward`/`screlu` during the first eval.
+        let hidden = 2;
+        let fw = vec![0i16; 768 * hidden];
+        let fb = vec![0i16; hidden];
+        let ow = vec![0i16; 2 * hidden];
+        for (qa, qb) in [(0i16, 64i16), (255, 0), (-1, 64), (255, -1)] {
+            let bytes = encode_net(1, 1, hidden, &fw, &fb, &ow, 0, qa, qb, 400);
+            assert!(Nnue::from_bytes(&bytes).is_err(), "qa={qa} qb={qb} must be rejected");
+        }
     }
 
     #[test]

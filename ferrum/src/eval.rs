@@ -7,7 +7,9 @@ pub const MATERIAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 pub struct Hce;
 
 fn pst(piece: usize, square: u8, color: Color) -> i32 {
-    let s = if color == Color::White { square ^ 56 } else { square };
+    // Tables are rank-based and measured from the moving side's own back rank, so
+    // White reads `square` directly and Black is vertically mirrored (`^ 56`).
+    let s = if color == Color::Black { square ^ 56 } else { square };
     let file = (s & 7) as i32;
     let rank = (s >> 3) as i32;
     let center = 6 - (file - 3).abs() - (rank - 3).abs();
@@ -56,5 +58,16 @@ mod tests {
         let center = Board::from_fen("k7/8/8/8/4N3/8/8/K7 w - - 0 1").unwrap();
         let corner = Board::from_fen("k7/8/8/8/8/8/8/K6N w - - 0 1").unwrap();
         assert!(Hce.eval(&center) > Hce.eval(&corner));
+    }
+    #[test]
+    fn pst_rewards_pawn_advancement() {
+        // A pawn nearer promotion must score higher (the rank-based PST is measured
+        // from the mover's own side): White pawn on e4 > e2, Black pawn on e5 > e7.
+        let e2 = Board::from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1").unwrap();
+        let e4 = Board::from_fen("4k3/8/8/8/4P3/8/8/4K3 w - - 0 1").unwrap();
+        assert!(Hce.eval(&e4) > Hce.eval(&e2), "advanced White pawn must score higher");
+        let e7 = Board::from_fen("4k3/4p3/8/8/8/8/8/4K3 b - - 0 1").unwrap();
+        let e5 = Board::from_fen("4k3/8/8/4p3/8/8/8/4K3 b - - 0 1").unwrap();
+        assert!(Hce.eval(&e5) > Hce.eval(&e7), "advanced Black pawn must score higher (stm-relative)");
     }
 }

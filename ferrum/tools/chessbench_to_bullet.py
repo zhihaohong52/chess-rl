@@ -214,6 +214,12 @@ def apply_move_on_board(board: chess.BaseBoard, move: chess.Move):
 
     b.remove_piece_at(move.from_square)
     new_pt = move.promotion if move.promotion else moving_pt
+    # The repo's MoveEncoder encodes queen promotions as ordinary from/to moves
+    # (promotion=None), so a pawn reaching the last rank without a flag is a queen
+    # promotion — restore it, else a checking queen-promo is misread as a quiet
+    # pawn push and a non-quiet position is wrongly kept in the training corpus.
+    if moving_pt == chess.PAWN and not move.promotion and chess.square_rank(move.to_square) == 7:
+        new_pt = chess.QUEEN
     b.set_piece_at(move.to_square, chess.Piece(new_pt, chess.WHITE))
 
     if is_castling:
