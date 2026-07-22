@@ -106,12 +106,17 @@ impl Nnue {
     /// full-refresh oracle; `apply_delta` is the O(changed features) fast path.
     fn accumulate(&self, board: &Board, perspective: Color) -> Vec<i32> {
         let mut acc: Vec<i32> = self.feature_bias.iter().map(|&b| b as i32).collect();
+        let (bucket, mirror) = if self.num_buckets == 1 {
+            (0, false)
+        } else {
+            Nnue::king_context(board.king_sq(perspective), perspective)
+        };
         for pt in 0..6 {
             for color in [Color::White, Color::Black] {
                 let mut pieces = board.bb[pc(color, pt)];
                 while pieces != 0 {
-                    let square = pop_lsb(&mut pieces);
-                    self.toggle_feature(&mut acc, Self::feature_index(perspective, color, pt, square), true);
+                    let sq = pop_lsb(&mut pieces);
+                    self.toggle_feature(&mut acc, Nnue::feature_index_bucketed(perspective, bucket, mirror, color, pt, sq), true);
                 }
             }
         }
@@ -463,6 +468,62 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A synthetic v2 bucketed net (distinct nonzero weights) so bucketed-path tests
+    /// don't need a trained net. Mirrors `synthetic`/`incremental_..._synthetic` style.
+    fn synthetic_bucketed_net(num_buckets: usize, hidden: usize) -> Nnue {
+        let feat_rows = num_buckets * 768;
+        let mut fw = vec![0i16; feat_rows * hidden];
+        for f in 0..feat_rows {
+            for h in 0..hidden {
+                fw[f * hidden + h] = (((f * 7 + h * 3 + 1) % 200) as i16) - 100;
+            }
+        }
+        let fb = vec![5i16; hidden];
+        let ow = vec![1i16; 2 * hidden];
+        let bytes = encode_net(2, num_buckets as u16, hidden, &fw, &fb, &ow, 0, 255, 64, 400);
+        Nnue::from_bytes(&bytes).unwrap()
+    }
+
+    /// Color-swap + vertical rank-flip of a FEN's board, flip side-to-move. Only valid
+    /// for fixtures with no castling rights / no ep square (use '-' for both) so the
+    /// transform is a clean board mirror.
+    fn mirror_fen(fen: &str) -> String {
+        let mut parts = fen.split_whitespace();
+        let board = parts.next().unwrap();
+        let side = parts.next().unwrap();
+        let swap_case = |row: &&str| -> String {
+            row.chars()
+                .map(|c| {
+                    if c.is_ascii_uppercase() {
+                        c.to_ascii_lowercase()
+                    } else if c.is_ascii_lowercase() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        };
+        let rows: Vec<&str> = board.split('/').collect();
+        let mirrored: Vec<String> = rows.iter().rev().map(swap_case).collect();
+        let new_side = if side == "w" { "b" } else { "w" };
+        format!("{} {} - - 0 1", mirrored.join("/"), new_side)
+    }
+
+    #[test]
+    fn bucketed_eval_is_perspective_symmetric() {
+        let net = synthetic_bucketed_net(NUM_BUCKETS, 8);
+        for fen in [
+            "r3k2r/pp1q1ppp/2n2n2/3pp3/3PP3/2N2N2/PP1Q1PPP/R3K2R w - - 0 1",
+            "8/2k2p2/3p4/1P6/2P5/3K4/5P2/8 w - - 0 1",
+            "6k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1",
+        ] {
+            let b = Board::from_fen(fen).unwrap();
+            let m = Board::from_fen(&mirror_fen(fen)).unwrap();
+            assert_eq!(net.eval(&b), net.eval(&m), "asymmetry at {fen} vs {}", mirror_fen(fen));
         }
     }
 
