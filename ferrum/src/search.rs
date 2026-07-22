@@ -281,7 +281,7 @@ impl Searcher {
     /// Move ordering for the main negamax search: SEE-based capture ranking (winning/equal
     /// captures above killers, losing captures below). Deliberately not shared with the
     /// cheap MVV-LVA `order` used by qsearch — the two are not interchangeable.
-    fn order_moves(&self, b: &Board, moves: &mut [Move], tt: Move, ply: i32) {
+    fn order_moves(&self, b: &Board, moves: &mut [Move], tt: Move, ply: i32, prev_pt: Option<usize>) {
         let p = (ply as usize).min(MAX_PLY - 1);
         moves.sort_by_cached_key(|m| {
             if *m == tt {
@@ -294,7 +294,14 @@ impl Searcher {
             } else if *m == self.killers[p][0] || *m == self.killers[p][1] {
                 -800_000
             } else {
-                0
+                // Quiet: rank by main + continuation history. Higher history sorts
+                // earlier; stays strictly between the killer band (-800_000) and the
+                // lowest-history quiet, never colliding with the bands above (history
+                // magnitude is bounded well under 100k by the gravity clamp).
+                let mover = b.piece_on(m.from()).unwrap();
+                let mut h = self.hist.quiet(b.side, m.from(), m.to());
+                if let Some(prev) = prev_pt { h += self.hist.cont(prev, mover * 64 + m.to() as usize); }
+                -h
             }
         });
     }
@@ -392,7 +399,7 @@ impl Searcher {
 
         let mut moves = Vec::with_capacity(64);
         generate(b, &mut moves);
-        self.order_moves(b, &mut moves, tt_move, ply);
+        self.order_moves(b, &mut moves, tt_move, ply, prev_pt);
 
         let mut legal = 0;
         let mut best = -MATE - 1;
@@ -830,9 +837,25 @@ mod tests {
         let mut s = Searcher::new(1);
         s.killers[0][0] = killer;
 
-        s.order_moves(&b, &mut moves, tt, 0);
+        s.order_moves(&b, &mut moves, tt, 0, None);
 
         assert_eq!(moves, vec![tt, capture, quiet_promotion, killer, quiet]);
+    }
+
+    #[test]
+    fn order_ranks_high_history_quiet_first_but_below_killers() {
+        let b = Board::from_fen("7k/8/8/8/8/8/8/R3K3 w - - 0 1").unwrap();
+        let mut s = Searcher::new(1);
+        let good = Move::new(0, 24, FLAG_QUIET);   // a1a4
+        let meh  = Move::new(0, 8,  FLAG_QUIET);   // a1a2
+        let killer = Move::new(4, 12, FLAG_QUIET); // e1e2, will be a killer
+        s.hist.update_quiet(Color::White, 0, 24, 5000);
+        s.killers[0][0] = killer;
+        let mut moves = vec![meh, good, killer];
+        s.order_moves(&b, &mut moves, Move::NONE, 0, None);
+        assert_eq!(moves[0], killer, "killer outranks history quiets");
+        assert_eq!(moves[1], good, "higher-history quiet before lower");
+        assert_eq!(moves[2], meh);
     }
 
     fn see_of(fen: &str, mv: &str) -> i32 {
