@@ -141,48 +141,18 @@ fn reset_aspiration_retries() {
 fn aspiration_retries() -> u32 {
     ASPIRATION_RETRIES.with(std::cell::Cell::get)
 }
-/// Search-shape switches. `Searcher::new` and `Searcher::with_net` build the
-/// production shape; nothing in `uci.rs` can reach these. `heuristics: false`
-/// disables every score-inexact heuristic — TT cutoffs, null-move, RFP, LMP,
-/// futility, LMR — leaving a pure alpha-beta core that the PVS equivalence test
-/// diffs against. `pvs` toggles principal variation search itself, off only in
-/// that same equivalence test.
-///
-/// Deliberately runtime bools rather than `#[cfg(test)]` conditionals: cfg-gating
-/// would mean the test suite exercises different code than ships, which
-/// reintroduces the exact risk this anchor exists to remove. The cost is one
-/// perfectly-predicted branch per pruning site.
-#[derive(Clone, Copy)]
-struct Shape {
-    /// Scout non-first moves with a null window, re-searching full-window only on
-    /// a fail-high inside the window. Off only in the equivalence test.
-    pvs: bool,
-    heuristics: bool,
-}
-
-impl Shape {
-    fn production() -> Self { Self { pvs: true, heuristics: true } }
-    /// Pure alpha-beta core. Test-only.
-    #[cfg(test)]
-    fn pure() -> Self { Self { pvs: true, heuristics: false } }
-}
-
 #[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
-pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind, hist: History, shape: Shape }
+pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind, hist: History }
 impl Searcher {
-    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce), hist: History::new(), shape: Shape::production() } }
+    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce), hist: History::new() } }
     /// Like `new`, but loads an NNUE net from `path` and uses it in place of `Hce`.
     /// Returns the load error (net file missing/malformed) without constructing a
     /// `Searcher` on failure — callers should keep their previous searcher (HCE) then.
     pub fn with_net(mb: usize, path: &str) -> Result<Self, String> {
         let net = Nnue::load(path)?;
-        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 }, hist: History::new(), shape: Shape::production() })
+        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 }, hist: History::new() })
     }
     pub fn node_count(&self) -> u64 { self.nodes }
-    /// Builds a searcher with a non-production shape. Test-only: no production
-    /// caller may construct anything but `Shape::production()`.
-    #[cfg(test)]
-    fn with_shape(mb: usize, shape: Shape) -> Self { Self { shape, ..Self::new(mb) } }
     /// Wraps `board.make`/`board.feature_delta` so every call site in the search tree
     /// threads the NNUE accumulator stack automatically (M2 Task 5): the delta is
     /// read from the pre-move position, the board is made, and — only when `eval` is
@@ -387,7 +357,7 @@ impl Searcher {
         let tt_entry = self.tt.probe(b.hash);
         let tt_move = tt_entry.map(|e| e.mv).unwrap_or(Move::NONE);
         if let Some(e) = tt_entry {
-            if self.shape.heuristics && ply > 0 && e.depth as i32 >= depth {
+            if ply > 0 && e.depth as i32 >= depth {
                 let score = from_tt(e.score, ply);
                 if e.bound == BOUND_EXACT
                     || e.bound == BOUND_LOWER && score >= beta
@@ -402,7 +372,7 @@ impl Searcher {
         // Reverse futility pruning (static null-move): at shallow depth, if the static
         // eval beats beta by a depth-scaled margin, assume the node holds and prune.
         // Fail-soft: returns the static eval.
-        if self.shape.heuristics && depth <= 6 && !in_check && beta.abs() < MATE_BOUND && static_eval - 80 * depth >= beta {
+        if depth <= 6 && !in_check && beta.abs() < MATE_BOUND && static_eval - 80 * depth >= beta {
             return static_eval;
         }
 
@@ -410,7 +380,7 @@ impl Searcher {
         // Guarded against check and likely-zugzwang (side must have non-pawn material).
         // Eval-gated: only attempted when static_eval already looks >= beta.
         // Fail-hard: returns beta (not the null score) on cutoff.
-        if self.shape.heuristics && depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND
+        if depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND
             && !in_check && static_eval >= beta && b.has_non_pawn_material(b.side)
         {
             let r = 2 + depth / 4;
@@ -447,7 +417,7 @@ impl Searcher {
             let gives_check = b.in_check(b.side);
             let quiet = !m.is_capture() && !m.is_promo();
             // late move pruning: skip late quiets at shallow depth once we have a real best
-            if self.shape.heuristics && legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
+            if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
                 && depth <= 3 && legal > 4 + depth * depth
             {
                 self.unmake_move(b, m, undo);
@@ -455,7 +425,7 @@ impl Searcher {
                 continue;
             }
             // futility pruning: skip late quiets whose static eval can't reach alpha
-            if self.shape.heuristics && legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
+            if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
                 && depth <= 4 && static_eval + 100 * depth <= alpha
             {
                 self.unmake_move(b, m, undo);
@@ -470,55 +440,20 @@ impl Searcher {
             // both the reduced probe and the full-depth re-search use the same
             // [-beta, -alpha] window, and the re-search only runs at full depth
             // when the reduced score beats alpha.
-            let reduce = if self.shape.heuristics && depth >= 3 && legal > 3 && quiet && !in_check && !gives_check {
+            let reduce = if depth >= 3 && legal > 3 && quiet && !in_check && !gives_check {
                 1 + (legal > 6) as i32
             } else {
                 0
             };
-            // Principal variation search. The first legal move establishes the PV and
-            // gets the full [alpha, beta] window. Every later move is first probed
-            // with a null window — a scout that can only prove "not better than
-            // alpha" or "better than alpha" — and we pay for a full-window re-search
-            // only when the scout lands strictly inside the window.
-            //
-            // At non-PV nodes beta == alpha + 1 already, so guard (c) is unsatisfiable
-            // and the re-search never runs: PVS costs nothing there. This also means
-            // the pre-existing LMR window [-beta, -alpha] was *already* a null window
-            // at those nodes, which is why M5 needs no separate LMR bundle.
-            let score = if !self.shape.pvs {
-                // Pre-M5 reference path, kept so `pvs: false` is a faithful v0.4.0
-                // baseline: reduced probe and re-search BOTH full-window. Without this
-                // arm the `!pvs` branch would skip LMR entirely and every PVS-on/off
-                // comparison would be measuring against a crippled baseline.
-                if reduce > 0 {
-                    let reduced = -self.negamax(b, depth - 1 - reduce, -beta, -alpha, ply + 1, Some(cur_pt));
-                    if reduced > alpha {
-                        -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
-                    } else {
-                        reduced
-                    }
-                } else {
+            let score = if reduce > 0 {
+                let reduced = -self.negamax(b, depth - 1 - reduce, -beta, -alpha, ply + 1, Some(cur_pt));
+                if reduced > alpha {
                     -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
-                }
-            } else if legal == 1 {
-                -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
-            } else {
-                // (a) reduced scout, when LMR applies; the sentinel makes (b)
-                //     unconditional when it does not, without duplicating the call.
-                let mut s = if reduce > 0 {
-                    -self.negamax(b, depth - 1 - reduce, -alpha - 1, -alpha, ply + 1, Some(cur_pt))
                 } else {
-                    alpha + 1
-                };
-                // (b) full-depth scout, once the reduced probe beat alpha
-                if s > alpha {
-                    s = -self.negamax(b, depth - 1, -alpha - 1, -alpha, ply + 1, Some(cur_pt));
+                    reduced
                 }
-                // (c) full-window re-search — PV nodes only, where beta > alpha + 1
-                if s > alpha && s < beta {
-                    s = -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt));
-                }
-                s
+            } else {
+                -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
             };
             self.history.pop();
             self.unmake_move(b, m, undo);
@@ -730,114 +665,6 @@ mod tests {
     fn aspiration_score(fen: &str, depth: u32, prev: i32) -> i32 {
         let mut board = Board::from_fen(fen).unwrap();
         Searcher::new(1).aspiration(&mut board, depth, prev)
-    }
-
-    fn nodes_at(fen: &str, depth: u32, shape: Shape) -> u64 {
-        let mut b = Board::from_fen(fen).unwrap();
-        let mut s = Searcher::with_shape(1, shape);
-        s.negamax(&mut b, depth as i32, -MATE, MATE, 0, None);
-        s.node_count()
-    }
-
-    #[test]
-    fn disabling_heuristics_widens_the_tree() {
-        // With TT cutoffs, null-move, RFP, LMP, futility and LMR all disabled the
-        // search must visit strictly more nodes at the same depth. This is what
-        // proves the `shape.heuristics` guards actually reached every pruning site —
-        // a guard that silently missed one would leave the counts much closer.
-        let pure = nodes_at(WINNING_CAPTURE_FEN, 5, Shape::pure());
-        let prod = nodes_at(WINNING_CAPTURE_FEN, 5, Shape::production());
-        assert!(pure > prod, "pure core {pure} nodes must exceed production {prod}");
-    }
-
-    /// (FEN, depth) pairs for the PVS equivalence anchor. Depths are deliberately
-    /// shallow: with TT cutoffs disabled the tree grows exponentially, so branchy
-    /// positions get depth 3 and sparse ones 4-7 (WINNING_CAPTURE_FEN sits at 7,
-    /// deepened from 6 during ladder-bug mutation testing).
-    const EQUIV_SUITE: [(&str, u32); 7] = [
-        (WINNING_CAPTURE_FEN, 7),                                       // sparse tactical
-        (RA8_MATE_FEN, 5),                                              // back-rank mate
-        (NEGATIVE_MATE_FEN, 4),                                         // side to move is in check, and mated
-        ("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", 4),                          // stalemate
-        ("8/8/1p1k4/p1p2p1p/P1P2P1P/1P1K4/8/8 w - - 0 1", 5),           // king-and-pawn endgame
-        ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 3), // Kiwipete, branchy
-        ("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 3), // quiet middlegame
-    ];
-
-    fn pure_score(fen: &str, depth: u32, pvs: bool) -> i32 {
-        let mut b = Board::from_fen(fen).unwrap();
-        Searcher::with_shape(1, Shape { pvs, ..Shape::pure() })
-            .negamax(&mut b, depth as i32, -MATE, MATE, 0, None)
-    }
-
-    #[test]
-    fn pvs_scores_identically_to_plain_alpha_beta() {
-        // THE M5 CORRECTNESS ANCHOR — replaces the full-window negamax invariant.
-        //
-        // Over a pure alpha-beta core (no TT cutoffs, null-move, RFP, LMP, futility
-        // or LMR) PVS is provably score-identical to plain full-window search: the
-        // null-window scouts only ever prove "not better than alpha", and every move
-        // that beats alpha is re-searched with the real window. Any divergence here
-        // is a genuine bug in the scout/re-search ladder.
-        //
-        // This does NOT prove LMR-under-PVS is sound — reductions are not
-        // score-preserving under any windowing scheme. `lmr_still_finds_deep_tactic`
-        // and the `*_keeps_tactics` tests remain the guard for that.
-        for (fen, depth) in EQUIV_SUITE {
-            assert_eq!(
-                pure_score(fen, depth, true),
-                pure_score(fen, depth, false),
-                "PVS diverged from full-window alpha-beta at {fen} depth {depth}"
-            );
-        }
-    }
-
-    /// Nodes for a full iterative-deepening search — the way the engine actually
-    /// plays. Unlike `nodes_at`, this includes aspiration windows and a TT warmed by
-    /// the shallower iterations, both of which narrow windows on their own.
-    fn think_nodes(fen: &str, depth: u32, shape: Shape) -> u64 {
-        let mut b = Board::from_fen(fen).unwrap();
-        let mut s = Searcher::with_shape(16, shape);
-        s.think(&mut b, &Limits { depth: Some(depth), ..Default::default() }, &[]);
-        s.node_count()
-    }
-
-    #[test]
-    fn pvs_does_not_inflate_the_real_search_tree() {
-        // PVS's node effect MUST be measured through `think`. A fixed-depth
-        // `negamax(-MATE, MATE)` comparison flatters PVS enormously — it reported a
-        // 77.9% "saving" that does not exist in play, because the `pvs: false` side of
-        // that comparison searches every root move with a full window against a cold
-        // TT, which the engine never does.
-        //
-        // Measured through `think`, PVS in this engine is roughly node-NEUTRAL: at PV
-        // nodes the ladder runs three searches (reduced scout, full-depth scout,
-        // full-window re-search) where the pre-M5 code ran two, and that cost offsets
-        // the narrower-window saving. Iterative deepening plus aspiration were already
-        // doing most of what PVS exists to do.
-        //
-        // So this is a regression guard, not a win condition: it catches a ladder bug
-        // that blows the tree up. Whether PVS is worth keeping is the SPRT's call.
-        const SUITE: [(&str, u32); 4] = [
-            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 8),
-            ("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 8),
-            ("2rq1rk1/pb1nbppp/1p2pn2/2pp4/3P1B2/2NBPN2/PPQ2PPP/R4RK1 w - - 0 11", 8),
-            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 8),
-        ];
-        let mut pvs_nodes = 0u64;
-        let mut full_nodes = 0u64;
-        for (fen, depth) in SUITE {
-            pvs_nodes += think_nodes(fen, depth, Shape::production());
-            full_nodes += think_nodes(fen, depth, Shape { pvs: false, ..Shape::production() });
-        }
-        println!(
-            "PVS {pvs_nodes} vs pre-M5 {full_nodes} nodes ({:+.1}%)",
-            100.0 * (pvs_nodes as f64 / full_nodes as f64 - 1.0)
-        );
-        assert!(
-            pvs_nodes * 100 <= full_nodes * 115,
-            "PVS {pvs_nodes} vs pre-M5 {full_nodes} nodes: tree inflated by more than 15%"
-        );
     }
 
     #[test]
