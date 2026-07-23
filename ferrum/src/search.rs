@@ -145,20 +145,26 @@ fn aspiration_retries() -> u32 {
 /// production shape; nothing in `uci.rs` can reach these. `heuristics: false`
 /// disables every score-inexact heuristic — TT cutoffs, null-move, RFP, LMP,
 /// futility, LMR — leaving a pure alpha-beta core that the PVS equivalence test
-/// diffs against.
+/// diffs against. `pvs` toggles principal variation search itself, off only in
+/// that same equivalence test.
 ///
 /// Deliberately runtime bools rather than `#[cfg(test)]` conditionals: cfg-gating
 /// would mean the test suite exercises different code than ships, which
 /// reintroduces the exact risk this anchor exists to remove. The cost is one
 /// perfectly-predicted branch per pruning site.
 #[derive(Clone, Copy)]
-struct Shape { heuristics: bool }
+struct Shape {
+    /// Scout non-first moves with a null window, re-searching full-window only on
+    /// a fail-high inside the window. Off only in the equivalence test.
+    pvs: bool,
+    heuristics: bool,
+}
 
 impl Shape {
-    fn production() -> Self { Self { heuristics: true } }
+    fn production() -> Self { Self { pvs: true, heuristics: true } }
     /// Pure alpha-beta core. Test-only.
     #[cfg(test)]
-    fn pure() -> Self { Self { heuristics: false } }
+    fn pure() -> Self { Self { pvs: true, heuristics: false } }
 }
 
 #[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
@@ -469,15 +475,35 @@ impl Searcher {
             } else {
                 0
             };
-            let score = if reduce > 0 {
-                let reduced = -self.negamax(b, depth - 1 - reduce, -beta, -alpha, ply + 1, Some(cur_pt));
-                if reduced > alpha {
-                    -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
-                } else {
-                    reduced
-                }
-            } else {
+            // Principal variation search. The first legal move establishes the PV and
+            // gets the full [alpha, beta] window. Every later move is first probed
+            // with a null window — a scout that can only prove "not better than
+            // alpha" or "better than alpha" — and we pay for a full-window re-search
+            // only when the scout lands strictly inside the window.
+            //
+            // At non-PV nodes beta == alpha + 1 already, so guard (c) is unsatisfiable
+            // and the re-search never runs: PVS costs nothing there. This also means
+            // the pre-existing LMR window [-beta, -alpha] was *already* a null window
+            // at those nodes, which is why M5 needs no separate LMR bundle.
+            let score = if !self.shape.pvs || legal == 1 {
                 -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt))
+            } else {
+                // (a) reduced scout, when LMR applies; the sentinel makes (b)
+                //     unconditional when it does not, without duplicating the call.
+                let mut s = if reduce > 0 {
+                    -self.negamax(b, depth - 1 - reduce, -alpha - 1, -alpha, ply + 1, Some(cur_pt))
+                } else {
+                    alpha + 1
+                };
+                // (b) full-depth scout, once the reduced probe beat alpha
+                if s > alpha {
+                    s = -self.negamax(b, depth - 1, -alpha - 1, -alpha, ply + 1, Some(cur_pt));
+                }
+                // (c) full-window re-search — PV nodes only, where beta > alpha + 1
+                if s > alpha && s < beta {
+                    s = -self.negamax(b, depth - 1, -beta, -alpha, ply + 1, Some(cur_pt));
+                }
+                s
             };
             self.history.pop();
             self.unmake_move(b, m, undo);
@@ -707,6 +733,48 @@ mod tests {
         let pure = nodes_at(WINNING_CAPTURE_FEN, 5, Shape::pure());
         let prod = nodes_at(WINNING_CAPTURE_FEN, 5, Shape::production());
         assert!(pure > prod, "pure core {pure} nodes must exceed production {prod}");
+    }
+
+    /// (FEN, depth) pairs for the PVS equivalence anchor. Depths are deliberately
+    /// shallow: with TT cutoffs disabled the tree grows exponentially, so branchy
+    /// positions get depth 3 and sparse ones 4-7 (WINNING_CAPTURE_FEN sits at 7,
+    /// deepened from 6 during ladder-bug mutation testing).
+    const EQUIV_SUITE: [(&str, u32); 7] = [
+        (WINNING_CAPTURE_FEN, 7),                                       // sparse tactical
+        (RA8_MATE_FEN, 5),                                              // back-rank mate
+        (NEGATIVE_MATE_FEN, 4),                                         // side to move is in check, and mated
+        ("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", 4),                          // stalemate
+        ("8/8/1p1k4/p1p2p1p/P1P2P1P/1P1K4/8/8 w - - 0 1", 5),           // king-and-pawn endgame
+        ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 3), // Kiwipete, branchy
+        ("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 3), // quiet middlegame
+    ];
+
+    fn pure_score(fen: &str, depth: u32, pvs: bool) -> i32 {
+        let mut b = Board::from_fen(fen).unwrap();
+        Searcher::with_shape(1, Shape { pvs, ..Shape::pure() })
+            .negamax(&mut b, depth as i32, -MATE, MATE, 0, None)
+    }
+
+    #[test]
+    fn pvs_scores_identically_to_plain_alpha_beta() {
+        // THE M5 CORRECTNESS ANCHOR — replaces the full-window negamax invariant.
+        //
+        // Over a pure alpha-beta core (no TT cutoffs, null-move, RFP, LMP, futility
+        // or LMR) PVS is provably score-identical to plain full-window search: the
+        // null-window scouts only ever prove "not better than alpha", and every move
+        // that beats alpha is re-searched with the real window. Any divergence here
+        // is a genuine bug in the scout/re-search ladder.
+        //
+        // This does NOT prove LMR-under-PVS is sound — reductions are not
+        // score-preserving under any windowing scheme. `lmr_still_finds_deep_tactic`
+        // and the `*_keeps_tactics` tests remain the guard for that.
+        for (fen, depth) in EQUIV_SUITE {
+            assert_eq!(
+                pure_score(fen, depth, true),
+                pure_score(fen, depth, false),
+                "PVS diverged from full-window alpha-beta at {fen} depth {depth}"
+            );
+        }
     }
 
     #[test]
