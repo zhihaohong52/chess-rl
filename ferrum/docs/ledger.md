@@ -27,6 +27,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-22 | M3 gen-1 net vs gen-0 — **NO IMPROVEMENT (negative result)** | — | — | Trained king-bucketed nets on the full 63M ChessBench corpus (final loss 0.0012–0.0014). **1024 hidden**: ~1.83× slower → lost at 8+0.08 (~42.5%, stopped early). **512 hidden (≈ gen-0 speed)**: SPRT vs gen-0 **−14.5 ± 21.9 Elo over 240 games (47.9%, 67% draws)** — not an improvement. Static evals near-identical to gen-0 (KRvK 348 vs 340, missing-rook −345 vs −344). **v0.3.0 (gen-0) remains the eval ceiling** for this data |
 | 2026-07-23 | M4 B1 (move-ordering history) — accepted | 108,359 | 65 pass/4 ignored; clippy clean | H1 accepted after 400 games: 114W/27L/259D, SPRT Delta-Elo **+76.8 ± 18.5**, LLR +2.95 crossed +2.94; main quiet + 1-ply continuation + capture history (the M1 T8 butterfly-only form lacked continuation/capture). B2 search-shaping flat, B3 singular −16, B4 correction-history +4.7 inconclusive — **all reverted** |
 | 2026-07-23 | M4 exit (anchored gauntlet) — **v0.4.0 tagged (search-modernization checkpoint)** | 108,359 | 65 pass/4 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (same 4 anchors, 8+0.08, cc2, fixed-anchor Ordo): **ferrum 2901.5 ± 25.2** (95% CI [2876, 2927]); **+232 over M2's 2669**, uniform per-anchor gain across the 2296–3423 pool; per-anchor ferrum score 73 / 65 / 19 / 28 % vs Stash-v17 2296 / Stash-v21 2713 / Stash-v37 3423 / Weiss 3320 |
+| 2026-07-24 | M5 (principal variation search) — **REJECTED / REVERTED (v0.4.0 stands)** | 108,359 (= v0.4.0; search byte-identical) | 64 pass/4 ignored; clippy clean; **search.rs byte-exact vs 3430cbc** | 3,000-game SPRT vs v0.4.0 (8+0.08, cc4, `gen0.bin` both sides, no adj): 410W/378L/2212D, **+3.71 ± 5.47 Elo** (nElo +8.42 ± 12.43, LOS 91%), LLR +0.88 never approached +2.94; inconclusive at cap → reject; PVS *cost* +6–10% nodes in real ID search |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -659,6 +660,55 @@ cost **$0** (all local). Remaining levers to 3000+: **more search at longer TC**
 (where B2/B4 may yet help) and **genuinely new data** (self-play + Stockfish
 labeling, a gen-2 effort).
 
+## M5 — principal variation search — REJECTED (v0.4.0 stands)
+
+**Hypothesis:** with M4's history move ordering closing the ordering gap, a PVS
+scout/re-search ladder (first move full-window, later moves null-window with a
+full re-search on `alpha < s < beta`) would cut nodes enough to lift strength at
+8+0.08. This retired the full-window negamax invariant held since M0. Spec
+`docs/superpowers/specs/2026-07-23-ferrum-m5-pvs-design.md`; plan
+`docs/superpowers/plans/2026-07-23-ferrum-m5.md`.
+
+**Result: no measurable strength gain; reverted to byte-exact v0.4.0.**
+
+**Definitive 3,000-game SPRT vs v0.4.0** (8+0.08, cc4, `gen0.bin` loaded into
+both engines via `EVALFILE`, no adjudication): 410W / 378L / 2212D, **+3.71 ±
+5.47 Elo** (nElo +8.42 ± 12.43, LOS 91%, 63% draws), pentanomial
+[4, 257, 948, 285, 6]. **LLR +0.88** — never approached the +2.94 accept
+boundary; inconclusive at the 3,000-game cap → **reject** (pre-committed, as M4
+B4). The point estimate is faintly positive but the 95% CI [−1.76, +9.18]
+straddles zero. Match wall-clock 4h40m.
+
+**Why it didn't pay: PVS *costs* nodes here, it doesn't save them.** The
+seductive "~78% node saving" measured at fixed depth with a cold TT is a
+**strawman** — the engine never searches that way. In the real path (iterative
+deepening + aspiration + warm TT), PV nodes run up to three searches (reduced
+scout, full-depth scout, full-window re-search) where pre-M5 ran two, and
+aspiration already narrows the root window, so PVS **cost +6–10% nodes** (+10.6%
+in-binary, +6.4% binary-to-binary). Two measurement bugs were caught before
+spending games: the fixed-depth strawman above, and a baseline where `pvs:false`
+silently disabled LMR (fixed so the off-path reproduces pre-M5 search to within
+0.02%). The result confirms **the search is compute-saturated at fast TC** — the
+M4 lesson (ordering was the one real gap) restated: shaving PV-node work buys
+nothing once ordering is good and the aspiration window is already narrow.
+
+**Correctness (the part that held).** A runtime `Shape { pvs, heuristics }`
+switch let a `pure()` core (the six inexact heuristics off) prove PVS **scores
+identically** to plain alpha-beta over 7 FENs at depth 4–6 — the exact class of
+bug a scout/re-search ladder introduces. The ladder was sound; it just wasn't
+worth its cost at this TC.
+
+**Disposition.** Full M5 code stack reverted (`af917ac`), `search.rs` **byte-exact
+vs `3430cbc`** (empty diff), 64 tests pass, clippy clean. The `Shape` scaffolding
+was reverted too, deviating from the plan (which kept it): after `ef2cc3c` an
+unread `pvs` field trips `clippy -D warnings`, and the spec + plan + git history
+preserve the approach better than dead code in the shipped tree. **No tag;
+`ferrum-v0.4.0` (2901.5 CCRL) stands.** M5 cost **$0** (all local). Remaining
+levers to 3000+ are unchanged and now more sharply indicated: **more search at
+longer TC** (PVS may yet pay when depth is deeper and windows wider) and
+**genuinely new data** (self-play + Stockfish labeling, a gen-2 effort) — *not*
+further fast-TC search micro-optimization, which is saturated.
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -701,6 +751,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-22 | M3 gen-1 training (A6000: full-corpus convert + 1024 & 512 runs + SPRT idle, ~3h) — negative result | ~$1.05 | ~$1.75 |
 | 2026-07-22 | M3 gen-1 vs gen-0 SPRT (local) — no improvement, v0.3.0 stands | $0.00 | ~$1.75 |
 | 2026-07-23 | M4 search modernization (4 bundles SPRT'd + 1120-game exit gauntlet, all local) — B1 accepted, 2901.5 CCRL, v0.4.0 | $0.00 | ~$1.75 |
+| 2026-07-24 | M5 PVS 3,000-game SPRT (local, 8+0.08, ~4h40m) — rejected, reverted to byte-exact v0.4.0 | $0.00 | ~$1.75 |
 
 Budget: ~$20–25 approved; **~$1.75 spent** (well under the $10 alert). Hard
 alerts at $10 and $20 cumulative.
