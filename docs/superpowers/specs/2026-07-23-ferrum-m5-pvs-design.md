@@ -94,9 +94,11 @@ Stored as `Searcher.shape`. These are **runtime bools, deliberately not
 code than ships, which reintroduces the exact risk the anchor exists to remove. The
 cost is one perfectly-predicted branch at each pruning site.
 
-**Acceptance condition on that cost:** `cargo run --release --bin ferrum -- bench`
-node rate must be within noise of the `3430cbc` baseline. If it is not, the
-implementation is wrong, not the design.
+**Acceptance condition on that cost:** measured at the point where the guards exist but
+PVS is not yet wired in, `./target/release/ferrum bench` must report a node count
+**exactly equal** to the `3430cbc` baseline, with nps inside the run-to-run noise band.
+Identical node counts are themselves the proof that adding the guards changed no
+behavior; the nps comparison is then a clean like-for-like measure of the branch cost.
 
 ## The move loop
 
@@ -172,8 +174,9 @@ window.
 Suite: at least six positions covering quiet middlegame, tactical (the existing
 knight-fork and back-rank FENs), a king-and-pawn endgame, a position with the side to
 move in check, a stalemate-adjacent position, and Kiwipete. The plan pins the exact
-FENs. Depth 4–6 — necessarily shallow, because with TT cutoffs disabled the tree
-grows exponentially.
+FENs. Depth 3–6, scaled to branching factor — necessarily shallow, because with TT
+cutoffs disabled the tree grows exponentially and `cargo test` builds in debug by
+default. Branchy positions get 3, sparse ones 5–6.
 
 ### 2. New — node-count pre-gate
 
