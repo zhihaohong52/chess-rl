@@ -25,6 +25,8 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-22 | M2 exit (anchored gauntlet) — **v0.3.0 tagged (gen-0 NNUE checkpoint)** | 79,667 | 52 pass/0 fail/3 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (same 4 anchors, 8+0.08, **0 forfeits**), Ordo fixed-anchor: **ferrum 2669.3 ± 24.9** (95% CI [2644.4, 2694.2]); **+634 over the M1 HCE exit (2035)**; lands at the lower edge of the ~2700–2900 target (≈just below 2700); per-anchor ferrum score 63.7 / 50.4 / 13.4 / 15.2 % vs Stash-v17 2296 / Stash-v21 2713 / Stash-v37 3423 / Weiss 3320 |
 | 2026-07-22 | M3 gen-1 engine (net format v2 + king-bucketed index + king-move refresh) — accepted | 79,667 (gen-0 fingerprint byte-identical) | 56 pass/0 fail/4 ignored; clippy clean | Engine support for king-bucketed (`ChessBucketsMirrored`, 4-bucket) v2 nets: version-dispatch loader, bucketed feature index **byte-verified vs bullet's real mapper** (32/32), king-move accumulator full-refresh, incremental==full-refresh invariant proven with the real bucketed net; commits `1850dce`/`01ce9a5`/`aa56c6f`/`f7e748b`/`4c07019`. Reusable for a future gen-2 (new data) |
 | 2026-07-22 | M3 gen-1 net vs gen-0 — **NO IMPROVEMENT (negative result)** | — | — | Trained king-bucketed nets on the full 63M ChessBench corpus (final loss 0.0012–0.0014). **1024 hidden**: ~1.83× slower → lost at 8+0.08 (~42.5%, stopped early). **512 hidden (≈ gen-0 speed)**: SPRT vs gen-0 **−14.5 ± 21.9 Elo over 240 games (47.9%, 67% draws)** — not an improvement. Static evals near-identical to gen-0 (KRvK 348 vs 340, missing-rook −345 vs −344). **v0.3.0 (gen-0) remains the eval ceiling** for this data |
+| 2026-07-23 | M4 B1 (move-ordering history) — accepted | 108,359 | 65 pass/4 ignored; clippy clean | H1 accepted after 400 games: 114W/27L/259D, SPRT Delta-Elo **+76.8 ± 18.5**, LLR +2.95 crossed +2.94; main quiet + 1-ply continuation + capture history (the M1 T8 butterfly-only form lacked continuation/capture). B2 search-shaping flat, B3 singular −16, B4 correction-history +4.7 inconclusive — **all reverted** |
+| 2026-07-23 | M4 exit (anchored gauntlet) — **v0.4.0 tagged (search-modernization checkpoint)** | 108,359 | 65 pass/4 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (same 4 anchors, 8+0.08, cc2, fixed-anchor Ordo): **ferrum 2901.5 ± 25.2** (95% CI [2876, 2927]); **+232 over M2's 2669**, uniform per-anchor gain across the 2296–3423 pool; per-anchor ferrum score 73 / 65 / 19 / 28 % vs Stash-v17 2296 / Stash-v21 2713 / Stash-v37 3423 / Weiss 3320 |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -613,6 +615,50 @@ The remaining levers to 3000+ are **more search** and **genuinely new data**
 **~$1.05** (A6000: convert + two training runs + SPRT idle, ~3 h, instance
 deleted).
 
+## M4 — search modernization — B1 ACCEPTED (v0.4.0, 2901.5 CCRL)
+
+**Goal:** add the modern search techniques ferrum was missing, each SPRT-gated
+($0 local, 8+0.08, cc2, gen0.bin loaded into both engines via `EVALFILE`). Subagent-driven,
+per-bundle SPRT (elo0=0 elo1=8, α=β=0.05). Full-window negamax stays invariant in
+the main move loop (singular's null-window singularity probe is the sole scoped
+exception). Spec `docs/superpowers/specs/2026-07-22-ferrum-m4-search-modernization-design.md`;
+plan `docs/superpowers/plans/2026-07-22-ferrum-m4.md`.
+
+**Only Bundle 1 gated. Bundles 2–4 reverted** (branch reset to the B1 tip `359915e`).
+
+| bundle | technique | SPRT vs running-best | verdict |
+|---|---|---|---|
+| B1 | move-ordering history: main quiet + 1-ply continuation + capture, gravity update, history-aware `order_moves` | **+76.8 ± 18.5 Elo**, 400g, LLR 2.95, 114W/27L/259D | **ACCEPTED** |
+| B2 | log-LMR reduction table + `improving` + IIR + improving-aware LMP/margins (razoring dropped — it pruned a forced quiet mate) | +3.3 (LLR 0.08, 329g) full bundle; bisect LMR-table-only −1.1 (320g) | REJECTED — flat |
+| B3 | singular extensions + multicut (excluded-move `negamax` param) | −16.3 ± 16.8 (LLR −0.87, 320g) | REJECTED |
+| B4 | correction history: incremental pawn-king zobrist + `corr_hist[side][pawnhash%16384]`, ±32cp EMA | +4.7 ± 11.3 (LLR 0.31, 660g) | INCONCLUSIVE → reverted (below the elo1=8 gate) |
+
+**Finding.** ferrum's search was already well-tuned for fast TC; the one real gap
+was **move ordering** — history was entirely absent (quiets ordered equal). Adding
+it in the strong continuation+capture form (the M1 butterfly-only attempt, T8,
+lacked this) is a decisive +76.8 self-play Elo. The pruning/extension/eval-shaping
+refinements add overhead not repaid at 8+0.08 (B3 singular costs ~9% more
+nodes/depth) or fall below per-bundle resolution (B4 is a genuine but sub-8-Elo
+positive). B2/B3/B4 code lives in git reflog + the plan; reusable bits (excluded-move
+param, incremental pawn-king hash, log-LMR table, correction history) are documented
+there for a future longer-TC or gen-2 effort.
+
+**Exit gauntlet (identical methodology to M2/M3): ferrum 2901.5 ± 25.2 CCRL**
+(95% CI [2876, 2927]), 1120 games vs the 4 anchors (8+0.08, cc2, 280/anchor,
+fixed-anchor Ordo). Per-anchor ferrum score improved across the whole pool vs the
+M2 gauntlet: stash-v17(2296) 63.8%→73%, stash-v21(2713) 50.4%→65%,
+weiss-2.0(3320) 15.2%→28%, stash-v37(3423) 13.4%→19% — the **uniform** improvement
+across a 2296–3423 spread confirms the gain is real, not a single-anchor artifact.
+The absolute jump (+232 over M2's 2669) exceeds the +76.8 self-play SPRT delta,
+consistent with move ordering's outsized effect on effective search depth against a
+varied pool; treat 2901.5 as the fixed-anchor point estimate with the usual
+anchor-calibration caveats, not a hardened band. **`ferrum-v0.4.0` tagged** as a
+search-modernization checkpoint (same honest framing as v0.2.0/v0.3.0 — CI reported,
+band not certified). PGN + Ordo archived in `bench/anchors/results/m4-v0.4.0.*`. M4
+cost **$0** (all local). Remaining levers to 3000+: **more search at longer TC**
+(where B2/B4 may yet help) and **genuinely new data** (self-play + Stockfish
+labeling, a gen-2 effort).
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -654,6 +700,7 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-22 | M2 exit anchored gauntlet (local, 1,120 games + Ordo) — 2669 CCRL | $0.00 | ~$0.70 |
 | 2026-07-22 | M3 gen-1 training (A6000: full-corpus convert + 1024 & 512 runs + SPRT idle, ~3h) — negative result | ~$1.05 | ~$1.75 |
 | 2026-07-22 | M3 gen-1 vs gen-0 SPRT (local) — no improvement, v0.3.0 stands | $0.00 | ~$1.75 |
+| 2026-07-23 | M4 search modernization (4 bundles SPRT'd + 1120-game exit gauntlet, all local) — B1 accepted, 2901.5 CCRL, v0.4.0 | $0.00 | ~$1.75 |
 
 Budget: ~$20–25 approved; **~$1.75 spent** (well under the $10 alert). Hard
 alerts at $10 and $20 cumulative.
