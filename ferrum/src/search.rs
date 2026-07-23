@@ -141,18 +141,42 @@ fn reset_aspiration_retries() {
 fn aspiration_retries() -> u32 {
     ASPIRATION_RETRIES.with(std::cell::Cell::get)
 }
+/// Search-shape switches. `Searcher::new` and `Searcher::with_net` build the
+/// production shape; nothing in `uci.rs` can reach these. `heuristics: false`
+/// disables every score-inexact heuristic — TT cutoffs, null-move, RFP, LMP,
+/// futility, LMR — leaving a pure alpha-beta core that the PVS equivalence test
+/// diffs against.
+///
+/// Deliberately runtime bools rather than `#[cfg(test)]` conditionals: cfg-gating
+/// would mean the test suite exercises different code than ships, which
+/// reintroduces the exact risk this anchor exists to remove. The cost is one
+/// perfectly-predicted branch per pruning site.
+#[derive(Clone, Copy)]
+struct Shape { heuristics: bool }
+
+impl Shape {
+    fn production() -> Self { Self { heuristics: true } }
+    /// Pure alpha-beta core. Test-only.
+    #[cfg(test)]
+    fn pure() -> Self { Self { heuristics: false } }
+}
+
 #[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
-pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind, hist: History }
+pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind, hist: History, shape: Shape }
 impl Searcher {
-    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce), hist: History::new() } }
+    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce), hist: History::new(), shape: Shape::production() } }
     /// Like `new`, but loads an NNUE net from `path` and uses it in place of `Hce`.
     /// Returns the load error (net file missing/malformed) without constructing a
     /// `Searcher` on failure — callers should keep their previous searcher (HCE) then.
     pub fn with_net(mb: usize, path: &str) -> Result<Self, String> {
         let net = Nnue::load(path)?;
-        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 }, hist: History::new() })
+        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 }, hist: History::new(), shape: Shape::production() })
     }
     pub fn node_count(&self) -> u64 { self.nodes }
+    /// Builds a searcher with a non-production shape. Test-only: no production
+    /// caller may construct anything but `Shape::production()`.
+    #[cfg(test)]
+    fn with_shape(mb: usize, shape: Shape) -> Self { Self { shape, ..Self::new(mb) } }
     /// Wraps `board.make`/`board.feature_delta` so every call site in the search tree
     /// threads the NNUE accumulator stack automatically (M2 Task 5): the delta is
     /// read from the pre-move position, the board is made, and — only when `eval` is
@@ -357,7 +381,7 @@ impl Searcher {
         let tt_entry = self.tt.probe(b.hash);
         let tt_move = tt_entry.map(|e| e.mv).unwrap_or(Move::NONE);
         if let Some(e) = tt_entry {
-            if ply > 0 && e.depth as i32 >= depth {
+            if self.shape.heuristics && ply > 0 && e.depth as i32 >= depth {
                 let score = from_tt(e.score, ply);
                 if e.bound == BOUND_EXACT
                     || e.bound == BOUND_LOWER && score >= beta
@@ -372,7 +396,7 @@ impl Searcher {
         // Reverse futility pruning (static null-move): at shallow depth, if the static
         // eval beats beta by a depth-scaled margin, assume the node holds and prune.
         // Fail-soft: returns the static eval.
-        if depth <= 6 && !in_check && beta.abs() < MATE_BOUND && static_eval - 80 * depth >= beta {
+        if self.shape.heuristics && depth <= 6 && !in_check && beta.abs() < MATE_BOUND && static_eval - 80 * depth >= beta {
             return static_eval;
         }
 
@@ -380,7 +404,7 @@ impl Searcher {
         // Guarded against check and likely-zugzwang (side must have non-pawn material).
         // Eval-gated: only attempted when static_eval already looks >= beta.
         // Fail-hard: returns beta (not the null score) on cutoff.
-        if depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND
+        if self.shape.heuristics && depth >= 3 && ply > 0 && beta.abs() < MATE_BOUND
             && !in_check && static_eval >= beta && b.has_non_pawn_material(b.side)
         {
             let r = 2 + depth / 4;
@@ -417,7 +441,7 @@ impl Searcher {
             let gives_check = b.in_check(b.side);
             let quiet = !m.is_capture() && !m.is_promo();
             // late move pruning: skip late quiets at shallow depth once we have a real best
-            if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
+            if self.shape.heuristics && legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
                 && depth <= 3 && legal > 4 + depth * depth
             {
                 self.unmake_move(b, m, undo);
@@ -425,7 +449,7 @@ impl Searcher {
                 continue;
             }
             // futility pruning: skip late quiets whose static eval can't reach alpha
-            if legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
+            if self.shape.heuristics && legal > 1 && quiet && !in_check && !gives_check && best > -MATE_BOUND
                 && depth <= 4 && static_eval + 100 * depth <= alpha
             {
                 self.unmake_move(b, m, undo);
@@ -440,7 +464,7 @@ impl Searcher {
             // both the reduced probe and the full-depth re-search use the same
             // [-beta, -alpha] window, and the re-search only runs at full depth
             // when the reduced score beats alpha.
-            let reduce = if depth >= 3 && legal > 3 && quiet && !in_check && !gives_check {
+            let reduce = if self.shape.heuristics && depth >= 3 && legal > 3 && quiet && !in_check && !gives_check {
                 1 + (legal > 6) as i32
             } else {
                 0
@@ -665,6 +689,24 @@ mod tests {
     fn aspiration_score(fen: &str, depth: u32, prev: i32) -> i32 {
         let mut board = Board::from_fen(fen).unwrap();
         Searcher::new(1).aspiration(&mut board, depth, prev)
+    }
+
+    fn nodes_at(fen: &str, depth: u32, shape: Shape) -> u64 {
+        let mut b = Board::from_fen(fen).unwrap();
+        let mut s = Searcher::with_shape(1, shape);
+        s.negamax(&mut b, depth as i32, -MATE, MATE, 0, None);
+        s.node_count()
+    }
+
+    #[test]
+    fn disabling_heuristics_widens_the_tree() {
+        // With TT cutoffs, null-move, RFP, LMP, futility and LMR all disabled the
+        // search must visit strictly more nodes at the same depth. This is what
+        // proves the `shape.heuristics` guards actually reached every pruning site —
+        // a guard that silently missed one would leave the counts much closer.
+        let pure = nodes_at(WINNING_CAPTURE_FEN, 5, Shape::pure());
+        let prod = nodes_at(WINNING_CAPTURE_FEN, 5, Shape::production());
+        assert!(pure > prod, "pure core {pure} nodes must exceed production {prod}");
     }
 
     #[test]
