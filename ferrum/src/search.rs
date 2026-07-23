@@ -778,6 +778,37 @@ mod tests {
     }
 
     #[test]
+    fn pvs_searches_fewer_nodes_than_full_window() {
+        // Pre-gate for the SPRT: if the scout is not firing, PVS is a no-op and the
+        // 400+ games would be measuring a bug. `pvs: false` is exactly the v0.4.0
+        // search (Task 1 verified this by an identical bench node count), so this is
+        // a like-for-like comparison inside one binary.
+        const SUITE: [(&str, u32); 4] = [
+            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 7),
+            ("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 7),
+            ("2rq1rk1/pb1nbppp/1p2pn2/2pp4/3P1B2/2NBPN2/PPQ2PPP/R4RK1 w - - 0 11", 7),
+            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 7),
+        ];
+        let mut pvs_nodes = 0u64;
+        let mut full_nodes = 0u64;
+        for (fen, depth) in SUITE {
+            pvs_nodes += nodes_at(fen, depth, Shape::production());
+            full_nodes += nodes_at(fen, depth, Shape { pvs: false, ..Shape::production() });
+        }
+        // Always print: the saving goes in the M5 ledger entry.
+        println!(
+            "PVS {pvs_nodes} vs full-window {full_nodes} nodes ({:.1}% saved)",
+            100.0 * (1.0 - pvs_nodes as f64 / full_nodes as f64)
+        );
+        // >= 10% fewer nodes. A smoke test that the scout fires, not a perf target —
+        // a correct PVS at this ordering quality should comfortably exceed it.
+        assert!(
+            pvs_nodes * 10 <= full_nodes * 9,
+            "PVS {pvs_nodes} vs full-window {full_nodes} nodes: saving below the 10% floor"
+        );
+    }
+
+    #[test]
     fn history_gravity_is_bounded_and_directional() {
         let mut h = History::new();
         for _ in 0..1000 { h.update_quiet(Color::White, 12, 28, 900); }
