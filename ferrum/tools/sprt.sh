@@ -34,9 +34,21 @@ PGN="$(mktemp -t ferrum-sprt-XXXXXX.pgn)"
 # Load an NNUE net into BOTH engines (M2+); HCE if EVALFILE unset. Search-feature
 # SPRTs MUST set this — otherwise the A/B compares HCE engines, not the real one.
 FERRUM_OPTS=(); [ -n "${EVALFILE:-}" ] && FERRUM_OPTS=( option.EvalFile="$EVALFILE" )
+# Optional adjudication — a THROUGHPUT lever only. At a fixed TC, games/hour is
+# wall-clock bound, so the only ways to go faster are more concurrency, a shorter
+# TC (which changes what is measured), or ending decided/dead games sooner. In an
+# even-strength A/B the pool is draw-heavy (M5 run 1: 69% draws, nearly all by
+# 3-fold repetition, i.e. played to the bitter end), so draw adjudication is the
+# cheapest real speedup. Both flags affect the two engines symmetrically.
+# OFF by default: M1-M4 gates ran without them, and leaving them off keeps new
+# gates comparable to those unless a run explicitly opts in.
+ADJ=()
+[ -n "${DRAW_ADJ:-}" ]   && ADJ+=( -draw movenumber=40 movecount=8 score=10 )
+[ -n "${RESIGN_ADJ:-}" ] && ADJ+=( -resign movecount=3 score=400 )
 echo "candidate: $CAND"
 echo "baseline:  $BASE"
 echo "evalfile:  ${EVALFILE:-<none, HCE>}"
+echo "adjudicate: draw=${DRAW_ADJ:-off} resign=${RESIGN_ADJ:-off}"
 echo "book:      $BOOK   tc: $TC   sprt: [$ELO0,$ELO1]   cap: $((ROUNDS*2)) games"
 
 "$FASTCHESS" \
@@ -46,6 +58,7 @@ echo "book:      $BOOK   tc: $TC   sprt: [$ELO0,$ELO1]   cap: $((ROUNDS*2)) game
   -openings file="$BOOK" format=epd order=random \
   -rounds "$ROUNDS" -games 2 -repeat \
   -concurrency "$CONCURRENCY" \
+  ${ADJ[@]+"${ADJ[@]}"} \
   -sprt elo0="$ELO0" elo1="$ELO1" alpha=0.05 beta=0.05 \
   -pgnout file="$PGN"
 
