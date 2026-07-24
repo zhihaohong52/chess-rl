@@ -43,6 +43,7 @@ fn main() {
             perft::perft_divide(&mut board, depth);
         }
         Some("bench") => bench::bench(),
+        Some("selfplay") => selfplay::main_selfplay(&args),
         _ => uci::run(),
     }
 }

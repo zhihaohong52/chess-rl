@@ -3,6 +3,8 @@
 //! for bullet training. Reuses search/board/eval unchanged.
 
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 use crate::board::Board;
 use crate::moves::Move;
@@ -172,6 +174,80 @@ pub fn keep(c: &Cand, seen: &mut HashSet<u64>) -> bool {
     seen.insert(c.hash) // false if already present
 }
 
+/// Maps a game's outcome to the White-relative wdl token and formats each kept
+/// candidate as `FEN | score | wdl`. Score and wdl are both White-relative
+/// (bullet's text convention; the loader flips to side-to-move using the FEN).
+pub fn emit_game(game: &Game, seen: &mut HashSet<u64>) -> Vec<String> {
+    let wdl = match game.outcome {
+        Outcome::WhiteWin => "1.0",
+        Outcome::Draw => "0.5",
+        Outcome::BlackWin => "0.0",
+    };
+    game.cands
+        .iter()
+        .filter(|c| keep(c, seen))
+        .map(|c| format!("{} | {} | {}", c.fen, c.white_score, wdl))
+        .collect()
+}
+
+/// Top-level datagen entry: plays `cfg.games` games, streaming kept lines to
+/// shard files `<out>.<seed>.NNNN.txt` capped at `cfg.shard_size` lines each.
+pub fn run_selfplay(cfg: &SelfplayConfig) -> std::io::Result<()> {
+    let mut searcher = match &cfg.net {
+        Some(path) => Searcher::with_net(cfg.mb, path)
+            .unwrap_or_else(|e| panic!("selfplay requires the NNUE net; load {path} failed: {e}")),
+        None => panic!("selfplay requires --net <gen0.bin> or EVALFILE (HCE datagen is a bug)"),
+    };
+    let mut rng = XorShift64::new(cfg.seed);
+    let mut seen: HashSet<u64> = HashSet::new();
+
+    let mut shard_idx = 0u32;
+    let mut written_in_shard = 0usize;
+    let mut positions_total = 0u64;
+    let mut writer = open_shard(cfg, shard_idx)?;
+
+    for _ in 0..cfg.games {
+        let game = play_game(&mut searcher, &mut rng, cfg);
+        for line in emit_game(&game, &mut seen) {
+            writeln!(writer, "{line}")?;
+            written_in_shard += 1;
+            positions_total += 1;
+            if written_in_shard >= cfg.shard_size {
+                writer.flush()?;
+                shard_idx += 1;
+                written_in_shard = 0;
+                writer = open_shard(cfg, shard_idx)?;
+            }
+        }
+    }
+    writer.flush()?;
+    // A single progress line the datagen launcher tails for Monitor.
+    eprintln!("selfplay seed={} positions={}", cfg.seed, positions_total);
+    Ok(())
+}
+
+fn open_shard(cfg: &SelfplayConfig, idx: u32) -> std::io::Result<BufWriter<File>> {
+    let path = format!("{}.{}.{:04}.txt", cfg.out, cfg.seed, idx);
+    Ok(BufWriter::new(File::create(path)?))
+}
+
+/// CLI: `ferrum selfplay --seed N --games N --nodes N --out PREFIX [--shard-size N]
+/// [--random-plies N] [--hash MB] [--net PATH]`. `--net` falls back to `$EVALFILE`.
+pub fn main_selfplay(args: &[String]) {
+    let get = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
+    let cfg = SelfplayConfig {
+        seed: get("--seed").and_then(|s| s.parse().ok()).unwrap_or(1),
+        games: get("--games").and_then(|s| s.parse().ok()).unwrap_or(1),
+        nodes: get("--nodes").and_then(|s| s.parse().ok()).unwrap_or(5_000),
+        out: get("--out").cloned().unwrap_or_else(|| "selfplay".into()),
+        shard_size: get("--shard-size").and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
+        random_plies: get("--random-plies").and_then(|s| s.parse().ok()).unwrap_or(8),
+        mb: get("--hash").and_then(|s| s.parse().ok()).unwrap_or(64),
+        net: get("--net").cloned().or_else(|| std::env::var("EVALFILE").ok()),
+    };
+    run_selfplay(&cfg).expect("selfplay io error");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +315,33 @@ mod tests {
             assert!(r.below(20) < 20);
             assert!(r.below(1) == 0);
         }
+    }
+
+    #[test]
+    fn emit_lines_are_white_relative_and_result_consistent() {
+        // A White win: every emitted line carries wdl 1.0 regardless of side to move.
+        let g = Game {
+            cands: vec![
+                cand_scored("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1", 30),
+                cand_scored("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b - - 0 1", -25),
+            ],
+            outcome: Outcome::WhiteWin,
+        };
+        let mut seen = HashSet::new();
+        let lines = emit_game(&g, &mut seen);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("| 1.0"), "white-win wdl is 1.0: {}", lines[0]);
+        assert!(lines[1].ends_with("| 1.0"), "same wdl for all positions: {}", lines[1]);
+        assert!(lines[0].contains("| 30 |"), "white-relative score preserved: {}", lines[0]);
+        // Draw ⇒ 0.5 ; Black win ⇒ 0.0
+        let d = Game { cands: vec![cand_scored("8/8/8/8/8/8/8/8 w - - 0 1", 0)], outcome: Outcome::Draw };
+        let mut s2 = HashSet::new();
+        assert!(emit_game(&d, &mut s2)[0].ends_with("| 0.5"));
+    }
+
+    fn cand_scored(fen: &str, white_score: i32) -> Cand {
+        Cand { fen: fen.into(), white_score, in_check: false, best_is_capture: false,
+               best_gives_check: false, is_mate_score: false,
+               hash: fen.bytes().map(|b| b as u64).sum() }
     }
 }
