@@ -141,16 +141,16 @@ fn reset_aspiration_retries() {
 fn aspiration_retries() -> u32 {
     ASPIRATION_RETRIES.with(std::cell::Cell::get)
 }
-#[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64> }
-pub struct Searcher { pub tt: Tt, nodes: u64, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind, hist: History }
+#[derive(Default)] pub struct Limits { pub depth: Option<u32>, pub movetime: Option<u64>, pub wtime: Option<u64>, pub btime: Option<u64>, pub winc: Option<u64>, pub binc: Option<u64>, pub nodes: Option<u64> }
+pub struct Searcher { pub tt: Tt, nodes: u64, node_limit: Option<u64>, deadline: Option<Instant>, stopped: bool, history: Vec<u64>, killers: [[Move; 2]; MAX_PLY], eval: EvalKind, hist: History }
 impl Searcher {
-    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce), hist: History::new() } }
+    pub fn new(mb: usize) -> Self { Self { tt:Tt::new(mb), nodes:0, node_limit:None, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Hce(Hce), hist: History::new() } }
     /// Like `new`, but loads an NNUE net from `path` and uses it in place of `Hce`.
     /// Returns the load error (net file missing/malformed) without constructing a
     /// `Searcher` on failure — callers should keep their previous searcher (HCE) then.
     pub fn with_net(mb: usize, path: &str) -> Result<Self, String> {
         let net = Nnue::load(path)?;
-        Ok(Self { tt:Tt::new(mb), nodes:0, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 }, hist: History::new() })
+        Ok(Self { tt:Tt::new(mb), nodes:0, node_limit:None, deadline:None, stopped:false, history:Vec::new(), killers: [[Move::NONE; 2]; MAX_PLY], eval:EvalKind::Nnue { net, stack: Vec::new(), top: 0 }, hist: History::new() })
     }
     pub fn node_count(&self) -> u64 { self.nodes }
     /// Wraps `board.make`/`board.feature_delta` so every call site in the search tree
@@ -177,16 +177,42 @@ impl Searcher {
         limits: &Limits,
         history: &[u64],
     ) -> Move {
+        let plan = plan_time(board, limits);
+        self.deadline = plan.map(|(_, hard)| Instant::now() + Duration::from_millis(hard));
+        self.node_limit = limits.nodes;
+        let soft = plan.map(|(s, _)| s);
+        self.search_root(board, limits, history, soft, true).0
+    }
+
+    /// Quiet, score-returning search for datagen: no `info` prints, node-limited, no
+    /// time management. Returns `(best_move, root_score)` with `root_score` relative
+    /// to the side to move (positive = good for `board.side`).
+    pub fn think_scored(
+        &mut self,
+        board: &mut Board,
+        limits: &Limits,
+        history: &[u64],
+    ) -> (Move, i32) {
+        self.deadline = None;
+        self.node_limit = limits.nodes;
+        self.search_root(board, limits, history, None, false)
+    }
+
+    fn search_root(
+        &mut self,
+        board: &mut Board,
+        limits: &Limits,
+        history: &[u64],
+        soft: Option<u64>,
+        verbose: bool,
+    ) -> (Move, i32) {
         self.nodes = 0;
         self.killers = [[Move::NONE; 2]; MAX_PLY];
         self.hist.clear();
         self.stopped = false;
         self.history = history.to_vec();
         self.eval.reset_accumulator(board);
-        let plan = plan_time(board, limits);
-        self.deadline = plan.map(|(_, hard)| Instant::now() + Duration::from_millis(hard));
         let start = Instant::now();
-        let soft = plan.map(|(s, _)| s);
 
         let mut best = Move::NONE;
         let mut prev_score = 0i32;
@@ -201,16 +227,14 @@ impl Searcher {
             if let Some(e) = self.tt.probe(board.hash) {
                 best = e.mv;
             }
-            println!(
-                "info depth {depth} score {} nodes {} pv {}",
-                score_text(score),
-                self.nodes,
-                if best == Move::NONE {
-                    "(none)".into()
-                } else {
-                    best.uci()
-                }
-            );
+            if verbose {
+                println!(
+                    "info depth {depth} score {} nodes {} pv {}",
+                    score_text(score),
+                    self.nodes,
+                    if best == Move::NONE { "(none)".into() } else { best.uci() }
+                );
+            }
             if best == prev_best {
                 stable += 1;
             } else {
@@ -218,7 +242,7 @@ impl Searcher {
                 prev_best = best;
             }
             if let Some(soft_ms) = soft {
-                let scale = if stable >= 3 { 6 } else { 10 };   // spend ~0.6x soft when the PV is stable
+                let scale = if stable >= 3 { 6 } else { 10 };
                 if start.elapsed().as_millis() as u64 >= soft_ms * scale / 10 {
                     break;
                 }
@@ -227,7 +251,7 @@ impl Searcher {
                 break;
             }
         }
-        best
+        (best, prev_score)
     }
 
     fn aspiration(&mut self, b: &mut Board, depth: u32, prev: i32) -> i32 {
@@ -267,7 +291,13 @@ impl Searcher {
         }
     }
 
-    fn timed_out(&mut self) -> bool { if self.nodes & 2047 == 0 { if self.deadline.is_some_and(|d| Instant::now() >= d) { self.stopped=true; } } self.stopped }
+    fn timed_out(&mut self) -> bool {
+        if self.nodes & 2047 == 0 {
+            if self.deadline.is_some_and(|d| Instant::now() >= d) { self.stopped = true; }
+            if self.node_limit.is_some_and(|n| self.nodes >= n) { self.stopped = true; }
+        }
+        self.stopped
+    }
     fn repeated(&self, hash:u64)->bool { self.history.iter().rev().skip(1).step_by(2).any(|&h|h==hash) }
 
     fn store_killer(&mut self, ply: i32, m: Move) {
@@ -665,6 +695,21 @@ mod tests {
     fn aspiration_score(fen: &str, depth: u32, prev: i32) -> i32 {
         let mut board = Board::from_fen(fen).unwrap();
         Searcher::new(1).aspiration(&mut board, depth, prev)
+    }
+
+    #[test]
+    fn think_scored_respects_node_limit_and_returns_a_score() {
+        let mut s = Searcher::new(16);
+        let mut b = Board::startpos();
+        let limits = Limits { nodes: Some(5_000), ..Default::default() };
+        let start_hash = b.hash;
+        let (mv, score) = s.think_scored(&mut b, &limits, &[start_hash]);
+        assert!(mv != Move::NONE, "must return a legal move");
+        // Node budget honored within the ~2048-node check granularity.
+        assert!(s.node_count() <= 5_000 + 2_048, "nodes {} over budget", s.node_count());
+        assert!(s.node_count() >= 1_000, "should have searched, got {}", s.node_count());
+        // Startpos is roughly balanced.
+        assert!(score.abs() < 200, "startpos score unexpectedly large: {score}");
     }
 
     #[test]
