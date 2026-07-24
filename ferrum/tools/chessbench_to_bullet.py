@@ -105,6 +105,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.game.move_encoder import get_move_encoder
 
+
+def result_bucket(win_prob: float) -> int:
+    """bullet result byte from a side-to-move win probability in [0,1]:
+    2=win, 1=draw, 0=loss. Bucketed so game_result ~= sigmoid(score) for the
+    ChessBench fraction (M6 spec §6.1), making the WDL blend ~no-op there."""
+    if win_prob > 0.6:
+        return 2
+    if win_prob < 0.4:
+        return 0
+    return 1
+
+
+if __name__ == "__main__" and "--selftest" in __import__("sys").argv:
+    assert result_bucket(0.95) == 2
+    assert result_bucket(0.50) == 1
+    assert result_bucket(0.05) == 0
+    assert result_bucket(0.61) == 2 and result_bucket(0.39) == 0
+    print("result_bucket selftest ok")
+    __import__("sys").exit(0)
+
+
 DEFAULT_CP_CLAMP = 3000
 
 # --- 32-byte bulletformat::ChessBoard, little-endian, no implicit padding ---
@@ -371,7 +392,7 @@ def iter_bullet_records(npz_path, cp_clamp=DEFAULT_CP_CLAMP, dedupe=True,
         w, dd, l = (float(x) for x in wdl_all[i])
         wp = wdl_to_winprob(w, dd, l)
         cp = clamp_cp(winprob_to_cp(wp), cp_clamp)
-        result = result_byte_from_winprob(wp)
+        result = result_bucket(wp)
 
         if stats is not None:
             stats["kept"] += 1
