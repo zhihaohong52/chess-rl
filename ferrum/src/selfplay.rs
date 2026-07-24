@@ -2,6 +2,8 @@
 //! filters to quiet positions, and streams White-relative `FEN | score | wdl` text
 //! for bullet training. Reuses search/board/eval unchanged.
 
+use std::collections::HashSet;
+
 use crate::board::Board;
 use crate::moves::Move;
 use crate::movegen::generate;
@@ -160,10 +162,36 @@ pub fn play_game(searcher: &mut Searcher, rng: &mut XorShift64, cfg: &SelfplayCo
     Game { cands, outcome }
 }
 
+/// Quiet-position filter (spec §5.5). Returns true if the candidate should be
+/// emitted, and records its hash for per-worker dedup. Drops: in-check, best move
+/// is a capture or gives check, mate scores, and already-seen Zobrist keys.
+pub fn keep(c: &Cand, seen: &mut HashSet<u64>) -> bool {
+    if c.in_check || c.best_is_capture || c.best_gives_check || c.is_mate_score {
+        return false;
+    }
+    seen.insert(c.hash) // false if already present
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::search::Searcher;
+
+    fn cand(in_check: bool, cap: bool, chk: bool, mate: bool, hash: u64) -> Cand {
+        Cand { fen: "8/8/8/8/8/8/8/8 w - - 0 1".into(), white_score: 0,
+               in_check, best_is_capture: cap, best_gives_check: chk, is_mate_score: mate, hash }
+    }
+
+    #[test]
+    fn filter_keeps_only_quiet_novel_positions() {
+        let mut seen = HashSet::new();
+        assert!(keep(&cand(false, false, false, false, 1), &mut seen), "quiet novel kept");
+        assert!(!keep(&cand(false, false, false, false, 1), &mut seen), "duplicate dropped");
+        assert!(!keep(&cand(true,  false, false, false, 2), &mut seen), "in-check dropped");
+        assert!(!keep(&cand(false, true,  false, false, 3), &mut seen), "capture-best dropped");
+        assert!(!keep(&cand(false, false, true,  false, 4), &mut seen), "check-giving-best dropped");
+        assert!(!keep(&cand(false, false, false, true,  5), &mut seen), "mate-score dropped");
+    }
 
     #[test]
     fn play_game_terminates_and_is_deterministic() {
