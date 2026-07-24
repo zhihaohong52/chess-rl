@@ -14,6 +14,7 @@ mod moves;
 mod movegen;
 mod perft;
 mod search;
+mod selfplay;
 mod tt;
 mod uci;
 
