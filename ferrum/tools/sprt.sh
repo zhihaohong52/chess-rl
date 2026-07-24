@@ -33,7 +33,13 @@ fi
 PGN="$(mktemp -t ferrum-sprt-XXXXXX.pgn)"
 # Load an NNUE net into BOTH engines (M2+); HCE if EVALFILE unset. Search-feature
 # SPRTs MUST set this — otherwise the A/B compares HCE engines, not the real one.
-FERRUM_OPTS=(); [ -n "${EVALFILE:-}" ] && FERRUM_OPTS=( option.EvalFile="$EVALFILE" )
+# Per-engine nets: CAND_EVALFILE/BASE_EVALFILE override the shared EVALFILE.
+# Used by net-vs-net SPRTs (M6: gen-2 cand vs gen-0 base). Falls back to the
+# shared EVALFILE for search-feature SPRTs (both engines same net).
+CAND_NET="${CAND_EVALFILE:-${EVALFILE:-}}"
+BASE_NET="${BASE_EVALFILE:-${EVALFILE:-}}"
+CAND_OPTS=(); [ -n "$CAND_NET" ] && CAND_OPTS=( option.EvalFile="$CAND_NET" )
+BASE_OPTS=(); [ -n "$BASE_NET" ] && BASE_OPTS=( option.EvalFile="$BASE_NET" )
 # Optional adjudication — a THROUGHPUT lever only. At a fixed TC, games/hour is
 # wall-clock bound, so the only ways to go faster are more concurrency, a shorter
 # TC (which changes what is measured), or ending decided/dead games sooner. In an
@@ -47,13 +53,14 @@ ADJ=()
 [ -n "${RESIGN_ADJ:-}" ] && ADJ+=( -resign movecount=3 score=400 )
 echo "candidate: $CAND"
 echo "baseline:  $BASE"
-echo "evalfile:  ${EVALFILE:-<none, HCE>}"
+echo "cand net:  ${CAND_NET:-<none, HCE>}"
+echo "base net:  ${BASE_NET:-<none, HCE>}"
 echo "adjudicate: draw=${DRAW_ADJ:-off} resign=${RESIGN_ADJ:-off}"
 echo "book:      $BOOK   tc: $TC   sprt: [$ELO0,$ELO1]   cap: $((ROUNDS*2)) games"
 
 "$FASTCHESS" \
-  -engine cmd="$CAND" name=cand "${FERRUM_OPTS[@]}" \
-  -engine cmd="$BASE" name=base "${FERRUM_OPTS[@]}" \
+  -engine cmd="$CAND" name=cand "${CAND_OPTS[@]}" \
+  -engine cmd="$BASE" name=base "${BASE_OPTS[@]}" \
   -each tc="$TC" \
   -openings file="$BOOK" format=epd order=random \
   -rounds "$ROUNDS" -games 2 -repeat \
