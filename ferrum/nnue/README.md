@@ -542,6 +542,16 @@ positions are highly correlated within a batch. Shuffle spills temp files to
   **direct 32-byte packing is byte-identical** to `bullet-utils convert --from text`
   over its own `--emit-text` output (`cmp` clean, W/D/L counts agree) — the same
   gate T6 applied to the self-play half now also holds for this half.
+- **npz shard shape (measured, 2026-07-26)** — 585 train shards = **195 groups ×
+  (`_00000` 250k + `_00001` 250k + `_00002` ~13.5k)** = 100.1M positions, matching
+  the 100.27M above. The `_00002` **tail shards are check-heavy oddballs**: 83%
+  in-check / 16% keep, vs 1.5% / 66% for a full shard. They are only ~0.6% of the
+  corpus (projected total keeps ≈ 64.8M, consistent with gen-0's 63M), so they need
+  no special handling — but do not use them to estimate the keep rate.
+  **Parallelise by group, not by `ls` round-robin**: with 6 workers, `i%6` over
+  `ls` order aligns with the 3-shards-per-group cycle and dumps every tail shard on
+  workers 2 and 5 (242 MB each) while 0/1/3/4 get 9.7 GB each — effective
+  parallelism 4, not 6.
 - **`validate` reports ~0.07% "No non-king pieces on the board" — expected, benign,
   and entirely from the self-play half** (14 / 20,000 in a slice; ~10k over 14.7M).
   These are bare **K-v-K** endings: adjudication doesn't stop on insufficient
