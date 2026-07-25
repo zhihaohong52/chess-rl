@@ -121,6 +121,9 @@ impl Variant {
     }
 }
 
+// NB: `GEN2_VAL` is accepted but bullet at `cebc78a` does NOT implement validation
+// ("Warning: Validation data not currently implemented!") — no val loss is ever
+// reported, so select between variants by SPRT, not by held-out loss.
 fn env(key: &str) -> Option<String> {
     match std::env::var(key) {
         Ok(value) if !value.is_empty() => Some(value),

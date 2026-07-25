@@ -449,9 +449,17 @@ outcomes). Remember the sign: bullet's `wdl` is the weight on the **result** ter
 | **v1** (primary) | mix: 63M ChessBench + 14.7M self-play | random | 40 × 6104 × 16384 | `StepLR{1e-3, γ.1, /18}` | gen-0's **proven step budget verbatim** — the only deltas vs gen-0 are the data and the WDL blend, not the optimisation |
 | **v2** (fallback) | self-play only (14.7M) | **gen-0 weights** | 12 × 897 × 16384 (≈1 epoch/superbatch) | `StepLR{2e-4, γ.3, /5}` | thin corpus, no mixed-WDL concern (spec §6.1); low LR because the loaded init has **cold momentum/velocity** |
 
-Other env knobs: `GEN2_DATA`, `GEN2_VAL` (optional held-out `.data` → reported
-validation loss), `GEN2_INIT` (required for v2), `GEN2_THREADS`, `GEN2_WDL`,
-`GEN2_SMOKE` (1 superbatch × 8 batches — the free laptop dry run below).
+Other env knobs: `GEN2_DATA`, `GEN2_VAL`, `GEN2_INIT` (required for v2),
+`GEN2_THREADS`, `GEN2_WDL`, `GEN2_SMOKE` (1 superbatch × 8 batches — the free
+laptop dry run below).
+
+**Trap 0: `GEN2_VAL` does nothing at `cebc78a`.** Passing `LocalSettings.test_set`
+makes bullet print `Warning: Validation data not currently implemented! Please
+bother me on discord.` and then ignore it — **no validation loss is ever reported**.
+Model selection must therefore be by **SPRT only**, never by held-out loss. (This
+also means M3's `gen1_train.rs` header comment — "select the run with the lowest
+validation loss (LocalSettings.test_set = the held-out val shard)" — describes
+something the trainer never did.) Do not bother holding data out.
 
 ## Two traps, both hit and fixed here (do not relearn)
 
