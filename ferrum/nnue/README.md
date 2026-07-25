@@ -522,6 +522,7 @@ Observed (2026-07-26), all four checks green:
 bullet-utils convert    --from text --input selfplay.txt --output selfplay.data --threads <n>
 bullet-utils interleave <in1.data> <in2.data> --output mix.data      # positional inputs, ≥2
 bullet-utils shuffle    --input mix.data --output mix.shuf.data --mem-used-mb 8192
+bullet-utils validate   --input mix.shuf.data                        # see the K-v-K note below
 ```
 
 **The shuffle pass is required, not optional.** `interleave` mixes *sources*
@@ -530,3 +531,21 @@ internal order — and self-play records come out in **game order**, so consecut
 positions are highly correlated within a batch. Shuffle spills temp files to
 `./tmp` in the CWD; budget ~2× the corpus size in free disk (mix ≈ 77.7M × 32 B ≈
 2.5 GB).
+
+### Both halves of the mix, validated locally (2026-07-26, free)
+
+- **ChessBench (`tools/chessbench_to_bullet.py`, T9 `result_bucket()`)** — smoked on
+  HF shard `train_00_00000.npz` (note the real filename pattern is
+  `train_<gg>_<nnnnn>.npz`, **not** `train_<nnnnn>.npz`): 20,000 kept / 30,147 read
+  (dropped 313 in-check, 9,834 noisy-move — the ~66% keep rate that turns 100M into
+  63M), scores clamped at ±2400, results 39% W / 35% D / 26% L. The script's
+  **direct 32-byte packing is byte-identical** to `bullet-utils convert --from text`
+  over its own `--emit-text` output (`cmp` clean, W/D/L counts agree) — the same
+  gate T6 applied to the self-play half now also holds for this half.
+- **`validate` reports ~0.07% "No non-king pieces on the board" — expected, benign,
+  and entirely from the self-play half** (14 / 20,000 in a slice; ~10k over 14.7M).
+  These are bare **K-v-K** endings: adjudication doesn't stop on insufficient
+  material, so a dead-drawn tail gets recorded. Score 0 + draw result ⇒ target
+  exactly 0.5, so they are wasted samples, not poison; the loader does not reject
+  them (a V1 smoke train over the interleaved+shuffled mix runs clean). Not worth
+  re-running datagen over. ChessBench's half validates with zero errors.
