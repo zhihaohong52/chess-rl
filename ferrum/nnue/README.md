@@ -429,3 +429,104 @@ approved pot without asking.
   and this repo's actual encoder — the one correction is the λ/`wdl_scheduler`
   sign mapping noted above, which is a documentation nuance, not an
   architecture change.
+
+---
+
+# M6 — gen-2 self-play training (`gen2_train.rs`)
+
+gen-2 is a **data** experiment, not an architecture one. The net is byte-identical
+in shape to gen-0 (`Chess768`, 768→512×2→1, SCReLU, QA=255/QB=64/SCALE=400, FeNN
+**v1**, 789,522 B), so it deploys as a pure `EvalFile` swap with no engine change.
+The single recipe change is `wdl_scheduler: ConstantWDL { value: 0.4 }` — the
+self-play corpus carries **real game outcomes**, so bullet's game-result term is
+informative for the first time (gen-0 was forced to `0.0`; ChessBench has no
+outcomes). Remember the sign: bullet's `wdl` is the weight on the **result** term.
+
+## Variants (`GEN2_VARIANT`, no recompile)
+
+| | data | init | steps | LR | rationale |
+|---|---|---|---|---|---|
+| **v1** (primary) | mix: 63M ChessBench + 14.7M self-play | random | 40 × 6104 × 16384 | `StepLR{1e-3, γ.1, /18}` | gen-0's **proven step budget verbatim** — the only deltas vs gen-0 are the data and the WDL blend, not the optimisation |
+| **v2** (fallback) | self-play only (14.7M) | **gen-0 weights** | 12 × 897 × 16384 (≈1 epoch/superbatch) | `StepLR{2e-4, γ.3, /5}` | thin corpus, no mixed-WDL concern (spec §6.1); low LR because the loaded init has **cold momentum/velocity** |
+
+Other env knobs: `GEN2_DATA`, `GEN2_VAL` (optional held-out `.data` → reported
+validation loss), `GEN2_INIT` (required for v2), `GEN2_THREADS`, `GEN2_WDL`,
+`GEN2_SMOKE` (1 superbatch × 8 batches — the free laptop dry run below).
+
+## Two traps, both hit and fixed here (do not relearn)
+
+1. **bullet does not auto-discover `examples/`.** The target must be registered in
+   `crates/bullet_lib/Cargo.toml` or cargo fails with ``no example target named
+   `gen2` ``. Append:
+   ```bash
+   printf '\n[[example]]\nname = "gen2"\npath = "../../examples/gen2.rs"\n' >> crates/bullet_lib/Cargo.toml
+   ```
+2. **`EVALFILE=<net> ./ferrum bench` is a NO-OP.** The binary never reads
+   `EVALFILE`; `bench` is **always HCE**. Two different nets therefore produce
+   byte-identical bench output, which reads as a false pass. (`EVALFILE` is a
+   convention of `tools/{sprt,gauntlet,datagen}.sh`, which translate it into
+   fastchess `option.EvalFile=` / `selfplay --net`.) Sanity-check a net through
+   UCI instead:
+   ```bash
+   printf 'setoption name EvalFile value %s\nposition startpos\ngo depth 10\nquit\n' "$NET" | ./target/release/ferrum
+   ```
+   A bad path prints `info string failed to load EvalFile …` and then silently
+   searches with HCE — always confirm that line is **absent**.
+
+## Recovering gen-0's weights for the v2 fine-tune
+
+bullet fine-tunes from an optimiser checkpoint (`<net>-<n>/optimiser_state/weights.bin`),
+but gen-0's checkpoint died with its (deleted) training instance — only the
+quantised, deployed `gen0.bin` survives. `gen0_to_bullet_weights.py` reconstructs
+the f32 weights from it, in bullet's own weight-store wire format (per weight:
+`<ascii id>\n` + `u64` LE count + `count × f32` LE; `WeightsStore::load_from` keys
+off the id, so order is irrelevant and a weights-only file suffices). Loaded via
+`trainer.optimiser.load_weights_from_file()` — weights only, no momentum.
+
+Verified on the real `gen0.bin`: dequantise→requantise is **round-trip exact**
+(the script asserts it), so this step adds no error beyond gen-0's original
+quantisation. Recovered ranges: `l0w` [−1.977, +1.455], `l0b` [−1.149, +0.863],
+`l1w` [±1.984] (at AdamW's ±1.98 clip, as expected), `l1b` +0.0324.
+
+## Free end-to-end dry run (done — do this again after any recipe edit)
+
+Whole path exercised locally on an M1 with `--features metal`, $0, before any GPU
+spend: init load → train → checkpoint → FeNN wrap → engine load → search.
+
+```bash
+cp ferrum/nnue/gen2_train.rs bullet/examples/gen2.rs   # + register it (trap 1)
+GEN2_VARIANT=v2 GEN2_SMOKE=1 GEN2_THREADS=4 GEN2_INIT=data/gen0_weights.bin \
+  cargo run --release --example gen2 --features metal
+python3 ferrum/nnue/build_gen2_bin.py checkpoints/gen2_v2-1/quantised.bin gen2_smoke.bin
+```
+
+Observed (2026-07-26), all four checks green:
+
+- **Init is semantically correct, not merely structurally**: identical data and
+  8 batches give running loss **0.0130 warm** vs **0.0435 random** (3.3× lower).
+  A misordered or misscaled load would look random or worse.
+- `quantised.bin` is 789,568 B (789,506 payload + bullet's 62-byte alignment pad);
+  `build_gen2_bin.py` strips the pad and emits exactly **789,522 B**.
+- Header builder is byte-exact: fed `gen0.bin`'s own payload, `build_gen2_bin.py`
+  reproduces `gen0.bin` **byte-for-byte** (`cmp` clean).
+- Engine loads the wrapped net and searches: startpos cp 21 / KRvK cp 540 at
+  depth 10 (gen-0 on the same probe: cp 22 / cp 376; HCE fallback: cp 5 / cp 520).
+  8 batches at 2e-4 moved 192,404 / 394,753 quantised weights, max |Δ| 38.
+
+## On-box data prep
+
+`bullet-utils` was built in an ephemeral job dir and is **gone** — rebuild it
+(`cargo build --release -p bullet-utils` at `cebc78a`). Verified CLI shapes:
+
+```bash
+bullet-utils convert    --from text --input selfplay.txt --output selfplay.data --threads <n>
+bullet-utils interleave <in1.data> <in2.data> --output mix.data      # positional inputs, ≥2
+bullet-utils shuffle    --input mix.data --output mix.shuf.data --mem-used-mb 8192
+```
+
+**The shuffle pass is required, not optional.** `interleave` mixes *sources*
+(random stream pick weighted by remaining count) but preserves each source's
+internal order — and self-play records come out in **game order**, so consecutive
+positions are highly correlated within a batch. Shuffle spills temp files to
+`./tmp` in the CWD; budget ~2× the corpus size in free disk (mix ≈ 77.7M × 32 B ≈
+2.5 GB).
