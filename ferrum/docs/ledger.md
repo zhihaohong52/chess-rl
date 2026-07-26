@@ -28,6 +28,7 @@ estimates. Internal metrics (bench, perft) track regressions.
 | 2026-07-23 | M4 B1 (move-ordering history) — accepted | 108,359 | 65 pass/4 ignored; clippy clean | H1 accepted after 400 games: 114W/27L/259D, SPRT Delta-Elo **+76.8 ± 18.5**, LLR +2.95 crossed +2.94; main quiet + 1-ply continuation + capture history (the M1 T8 butterfly-only form lacked continuation/capture). B2 search-shaping flat, B3 singular −16, B4 correction-history +4.7 inconclusive — **all reverted** |
 | 2026-07-23 | M4 exit (anchored gauntlet) — **v0.4.0 tagged (search-modernization checkpoint)** | 108,359 | 65 pass/4 ignored; clippy clean | 1,120-game CCRL-anchored gauntlet (same 4 anchors, 8+0.08, cc2, fixed-anchor Ordo): **ferrum 2901.5 ± 25.2** (95% CI [2876, 2927]); **+232 over M2's 2669**, uniform per-anchor gain across the 2296–3423 pool; per-anchor ferrum score 73 / 65 / 19 / 28 % vs Stash-v17 2296 / Stash-v21 2713 / Stash-v37 3423 / Weiss 3320 |
 | 2026-07-24 | M5 (principal variation search) — **REJECTED / REVERTED (v0.4.0 stands)** | 108,359 (= v0.4.0; search byte-identical) | 64 pass/4 ignored; clippy clean; **search.rs byte-exact vs 3430cbc** | 3,000-game SPRT vs v0.4.0 (8+0.08, cc4, `gen0.bin` both sides, no adj): 410W/378L/2212D, **+3.71 ± 5.47 Elo** (nElo +8.42 ± 12.43, LOS 91%), LLR +0.88 never approached +2.94; inconclusive at cap → reject; PVS *cost* +6–10% nodes in real ID search |
+| 2026-07-26 | M6 (gen-2 self-play NNUE) — **REJECTED (v0.4.0 stands)** | 108,359 (= v0.4.0; search behaviour unchanged, but `src/` differs by 3 files: `think`→`search_root` refactor + node limit + `think_scored`/`selfplay.rs` datagen additions) | 70 pass/4 ignored; clippy clean | Two 3,000-game net-vs-net SPRTs vs `gen0.bin` (8+0.08, cc2, same v0.4.0 binary, per-engine `EvalFile`, 0 forfeits): **V1 mix −3.71 ± 5.74** (LLR −2.39, 419W/451L/2130D) and **V2 fine-tune −4.05 ± 5.73** (LLR −2.55, 411W/446L/2143D); both inconclusive at cap → reject. 14,694,209 self-play positions; 77,241,163-record mix (63.0M ChessBench + 14.2M self-play), `wdl` blend 0.4. **Bootstrap ceiling:** positions labeled by ferrum's own eval add no eval information, only game results (18% of mix, 54% draws). Pipeline retained for gen-3 |
 
 ## M1 Task 4 — REJECTED / REVERTED
 
@@ -709,6 +710,88 @@ longer TC** (PVS may yet pay when depth is deeper and windows wider) and
 **genuinely new data** (self-play + Stockfish labeling, a gen-2 effort) — *not*
 further fast-TC search micro-optimization, which is saturated.
 
+## M6 — gen-2 self-play NNUE — REJECTED (v0.4.0 stands)
+
+**Hypothesis:** ferrum's own eval was trained on ChessBench *action values* — a
+derived, score-only target with **no game outcomes**, which forced gen-0's
+`wdl_scheduler` to `ConstantWDL{0.0}`. Generating self-play games with v0.4.0 would
+produce positions carrying **real W/D/L results**, making bullet's game-result term
+informative for the first time. Spec
+`docs/superpowers/specs/2026-07-24-ferrum-m6-selfplay-nnue-design.md`; plan
+`docs/superpowers/plans/2026-07-24-ferrum-m6.md`.
+
+**Result: neither variant beat gen-0. Both inconclusive at the 3,000-game cap →
+reject (pre-committed, as M4 B4 and M5).**
+
+| variant | data | init | games | Elo | nElo | LLR | W/L/D | draw% | LOS | pentanomial |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **V1 mix** (primary) | 63.0M ChessBench + 14.2M self-play | random | 3000 | **−3.71 ± 5.74** | −8.03 ± 12.43 | −2.39 | 419/451/2130 | 61.3% | 10.3% | [4, 308, 920, 252, 16] |
+| **V2 fine-tune** (fallback) | 14.2M self-play only | gen-0 weights | 3000 | **−4.05 ± 5.73** | −8.80 ± 12.43 | −2.55 | 411/446/2143 | 61.5% | 8.3% | [16, 284, 923, 273, 4] |
+
+Both net-vs-net, 8+0.08, cc2, no adjudication, **same v0.4.0 binary on both sides**
+with only `option.EvalFile` differing (`tools/sprt.sh` per-engine
+`CAND_EVALFILE`/`BASE_EVALFILE`). 9h06m each, **0 time-forfeits, 0 anomalies**. Both
+point estimates are negative with CIs that just straddle zero, and both PairsRatios
+are below 1.0 (0.86 / 0.92) — the candidates lost more pairs than they won. Neither
+LLR reached −2.94, so these are "no improvement", not "proven worse".
+
+**Pipeline delivered (the reusable part).** 14,694,209 self-play positions generated
+by v0.4.0 + `gen0.bin` at a node limit, quiet-filtered with Zobrist dedup, WDL
+22%W/54%D/24%L (no side bias). The full mix was **77,241,163 records** = 63,046,954
+ChessBench (re-converted with T9's score-bucketed result byte; 62% keep from 100.1M,
+reproducing gen-0's 63M) + 14,194,209 self-play, `interleave`d then `shuffle`d
+(shuffle is mandatory — self-play records come out in game order). Training on an
+A6000 via `bullet` @ `cebc78a`, arch **frozen** at gen-0's `Chess768` 768→512×2→1
+SCReLU so both nets are drop-in `EvalFile` swaps (789,522 B, FeNN v1): V1 = 40
+superbatches × 6104 × 16384 (gen-0's proven step budget verbatim), 39m39s at 1.7M
+pos/sec, final loss 0.007772; V2 = 12 × 897, 1m57s, loss 0.0130→0.0100.
+`wdl_scheduler: ConstantWDL{0.4}` on both — the experiment.
+
+**Why it didn't pay: the bootstrap ceiling (spec risk #2).** The corpus was labeled
+by ferrum v0.4.0's *own* ~2900-Elo eval at a shallow node limit, so its **scores
+carry no information gen-0's eval doesn't already encode** — the only genuinely new
+signal is the game *results*, and that was 18% of the mix at 54% draws. The blend
+did change the nets materially (V1 differs from gen-0 in ~all weights; depth-10
+probe: gen-0 startpos +22 / KRvK +376, V1 +61 / +665, V2 +41 / +1033 — markedly more
+decisive), so the WDL term was doing real work; it just wasn't work that converts to
+Elo. V2 isolates this cleanly: fine-tuning gen-0 on self-play alone, with no
+mixed-WDL confound, landed in the same place as V1, which rules out the spec §6.1
+mixed-WDL subtlety as the cause. **Self-play labeled by the engine itself is not new
+data.**
+
+**Four silent traps found and documented in `nnue/README.md`** (each would have
+produced a false pass or wasted GPU time): (1) `EVALFILE=… ./ferrum bench` is a
+**no-op** — `bench` is always HCE, so two different nets print byte-identical output;
+nets must be probed via UCI `setoption name EvalFile`. (2) `LocalSettings.test_set`
+is **not implemented** at `cebc78a` — no validation loss is ever produced, so variant
+selection is SPRT-only (M3's `gen1_train.rs` comment about picking the lowest val
+loss described something that never ran). (3) bullet does not auto-discover
+`examples/` — targets must be registered in `crates/bullet_lib/Cargo.toml`.
+(4) ChessBench npz is 195 groups × (250k + 250k + ~13.5k), and the small `_00002`
+tails are check-heavy oddballs (83% in-check / 16% keep vs 1.5% / 66%), so
+`ls`-round-robin sharding across 6 workers silently collapses to 4-way parallelism.
+The whole path (init → train → export → engine load) was dry-run locally on Metal
+via `GEN2_SMOKE=1` for $0 before any GPU spend; `build_gen2_bin.py` was proven
+byte-exact by reproducing `gen0.bin` from its own payload.
+
+**Disposition.** **No tag; `ferrum-v0.4.0` (2901.5 CCRL) stands.** The **search
+behaviour** is unchanged — bench still **108,359** (= v0.4.0), 70 tests pass, clippy
+clean — but unlike M5's byte-exact revert, the tree is *not* identical to
+`ferrum-v0.4.0`: `src/` differs by 3 files (+414/−20). `search.rs` was refactored
+(`think` → a shared `search_root` with a `verbose` flag gating the `info` prints) and
+gained `Limits.nodes` + `Searcher.node_limit` + a `think_scored` datagen entry point;
+the node-limit check at `search.rs:297` is a single `Option` test on a path where UCI
+always passes `None`. `selfplay.rs` (+347) and a `main.rs` subcommand line are pure
+additions. All of it is datagen scaffolding kept deliberately for gen-3. Nets stay gitignored. `bullet` optimiser
+checkpoints for both nets were preserved off-repo this time (losing gen-0's is what
+forced reconstructing its weights from the quantised net via
+`nnue/gen0_to_bullet_weights.py`). M6 cost **~$4.2** (GCP datagen + A6000 training).
+**Remaining levers to 3000+:** a **stronger labeler** (Stockfish-labeled positions,
+or self-play at much deeper search — the one thing that adds information this
+milestone did not), and **longer-TC search**, where M5's PVS may yet pay. Fast-TC
+search (M4/M5) and eval-architecture-on-ChessBench (M3) are both saturated; M6 now
+adds that **self-play data labeled by the engine itself is saturated too.**
+
 ## M0 exit — PASSED
 
 **Bar:** ferrum scores ≥ 25% vs Stockfish limited to UCI_Elo=2000 (i.e. within
@@ -752,9 +835,14 @@ that is the number the 3000+ goal is measured against.
 | 2026-07-22 | M3 gen-1 vs gen-0 SPRT (local) — no improvement, v0.3.0 stands | $0.00 | ~$1.75 |
 | 2026-07-23 | M4 search modernization (4 bundles SPRT'd + 1120-game exit gauntlet, all local) — B1 accepted, 2901.5 CCRL, v0.4.0 | $0.00 | ~$1.75 |
 | 2026-07-24 | M5 PVS 3,000-game SPRT (local, 8+0.08, ~4h40m) — rejected, reverted to byte-exact v0.4.0 | $0.00 | ~$1.75 |
+| 2026-07-25 | M6 self-play datagen (GCP `c2d-highcpu-32`, ~4.7h on-demand after a spot preemption lost 3.5M positions) — 14,694,209 positions | ~$3.50 | ~$5.25 |
+| 2026-07-26 | M6 gen-2 training (ThunderCompute A6000, 1h38m: 40GB npz pull + 6-way ChessBench convert + V1 39m39s + V2 1m57s) | ~$0.69 | ~$5.94 |
+| 2026-07-26 | M6 two 3,000-game net-vs-net SPRTs (local, 9h06m each) — both rejected, v0.4.0 stands | $0.00 | ~$5.94 |
 
-Budget: ~$20–25 approved; **~$1.75 spent** (well under the $10 alert). Hard
-alerts at $10 and $20 cumulative.
+Budget: ~$20–25 approved; **~$5.94 spent** (still under the $10 alert). Hard
+alerts at $10 and $20 cumulative. M6 was the first milestone with material spend
+since M3 (~$4.2 of the total), and it bought a reusable datagen/training pipeline
+plus a negative result, not Elo.
 
 ## Config at M0
 
